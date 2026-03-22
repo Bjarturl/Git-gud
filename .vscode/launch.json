@@ -1,0 +1,57 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Django Server",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/backend/manage.py",
+            "args": [
+                "runserver",
+                "0.0.0.0:8000"
+            ],
+            "django": true,
+            "justMyCode": false,
+            "cwd": "${workspaceFolder}/backend",
+            "console": "integratedTerminal",
+            "env": {
+                "DEBUG": "True",
+                "DB_HOST": "postgres",
+                "DB_NAME": "backend_db",
+                "DB_USER": "backend_user",
+                "DB_PASSWORD": "backend_password",
+                "DB_PORT": "5432",
+                "ELASTICSEARCH_HOST": "elasticsearch",
+                "ELASTICSEARCH_PORT": "9200",
+                "SECRET_KEY": "django-insecure-dev-key-for-devcontainer"
+            }
+        },
+        {
+            "name": "Task Worker",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/backend/manage.py",
+            "args": [
+                "run_task_worker",
+                "--queues",
+                "default",
+                "--verbose"
+            ],
+            "django": true,
+            "justMyCode": false,
+            "cwd": "${workspaceFolder}/backend",
+            "console": "integratedTerminal",
+            "env": {
+                "DEBUG": "True",
+                "DB_HOST": "postgres",
+                "DB_NAME": "backend_db",
+                "DB_USER": "backend_user",
+                "DB_PASSWORD": "backend_password",
+                "DB_PORT": "5432",
+                "ELASTICSEARCH_HOST": "elasticsearch",
+                "ELASTICSEARCH_PORT": "9200",
+                "SECRET_KEY": "django-insecure-dev-key-for-devcontainer"
+            }
+        }
+    ]
+}

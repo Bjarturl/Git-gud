@@ -1,0 +1,155 @@
+{% extends "admin/base_site.html" %}
+{% load admin_urls static %}
+
+{% block title %}{{ title }} | {{ site_title|default:"Django site admin" }}{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">Home</a>
+    &rsaquo; <a href="{% url 'admin:task_queue_taskjob_changelist' %}">Task jobs</a>
+    &rsaquo; {{ title }}
+</div>
+{% endblock %}
+
+{% block extrahead %}
+{{ block.super }}
+<style>
+    label {
+        display: block;
+        margin-bottom: 4px;
+    }
+    input, select {
+        margin-bottom: 12px;
+    }
+    #task-stats {
+        white-space: pre-line;
+        font-size: 12px;
+        color: #888;
+        margin-bottom: 12px;
+        min-height: 1em;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div>
+    {% if messages %}
+        {% for message in messages %}
+            <div class="message message-{{ message.tags }}">
+                {{ message }}
+            </div>
+        {% endfor %}
+    {% endif %}
+
+    {% if form.non_field_errors %}
+        <div>
+            {{ form.non_field_errors }}
+        </div>
+    {% endif %}
+
+    <form method="post" novalidate>
+        {% csrf_token %}
+
+        <label for="{{ form.task_type.id_for_label }}">Task Type</label>
+        {{ form.task_type }}
+        {{ form.task_type.errors }}
+
+        <div id="task-stats"></div>
+
+        <div id="user-discovery-fields">
+            <label for="{{ form.search_query.id_for_label }}">Search Query</label>
+            <input
+                type="text"
+                id="{{ form.search_query.id_for_label }}"
+                name="{{ form.search_query.name }}"
+                value="{{ form.search_query.value|default_if_none:'' }}"
+            >
+            {{ form.search_query.errors }}
+
+            <label for="{{ form.set_user_status.id_for_label }}">Set User Status</label>
+            {{ form.set_user_status }}
+            {{ form.set_user_status.errors }}
+        </div>
+
+        <div></div>
+
+        <input type="submit" value="Add Task">
+    </form>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    const taskTypeSelect = document.getElementById('{{ form.task_type.id_for_label }}');
+    const userDiscoveryFields = document.getElementById('user-discovery-fields');
+    const statsDiv = document.getElementById('task-stats');
+
+    function toggleFields() {
+        const isUserDiscovery =
+            taskTypeSelect.value === 'apps.task_queue.tasks.user_discovery_task';
+        userDiscoveryFields.style.display = isUserDiscovery ? 'block' : 'none';
+    }
+
+    function formatNumber(n) {
+        return n != null ? n.toLocaleString() : '-';
+    }
+
+    function renderStats(data) {
+        const s = data.stats;
+        if (s === null) {
+            statsDiv.textContent = 'Stats depend on search query.';
+            return;
+        }
+        if (!s || Object.keys(s).length === 0) {
+            statsDiv.textContent = '';
+            return;
+        }
+
+        let lines = [];
+
+        if ('total' in s) {
+            lines.push(
+                `${s.label}: ${formatNumber(s.remaining)} / ${formatNumber(s.total)} remaining (${s.pct}% done)`
+            );
+        }
+
+        if ('active_regexes' in s) {
+            lines.push(`Active regexes: ${s.active_regexes} (${s.never_run} never run, ${s.already_run} processed)`);
+            lines.push(`Total matches found so far: ${formatNumber(s.total_matches)}`);
+        }
+
+        if ('total_events' in s) {
+            if (s.last_event) {
+                lines.push(`Events ingested: ${formatNumber(s.total_events)}`);
+                lines.push(`Coverage: ${s.first_event} → ${s.last_event} (${formatNumber(s.hours_covered)} hours)`);
+                lines.push(`Behind by: ${formatNumber(s.hours_since_last)} hours`);
+            } else {
+                lines.push('No events ingested yet. Will start from 2011-02-12.');
+            }
+        }
+
+        if ('repos_with_events' in s) {
+            lines.push(`Repositories with events to sync: ${formatNumber(s.repos_with_events)}`);
+        }
+
+        statsDiv.textContent = lines.join('\n');
+    }
+
+    function fetchStats() {
+        const taskType = taskTypeSelect.value;
+        statsDiv.textContent = '';
+
+        fetch(`{% url 'admin:taskjob_task_stats' %}?task_type=${encodeURIComponent(taskType)}`)
+            .then(r => r.json())
+            .then(renderStats)
+            .catch(() => { statsDiv.textContent = ''; });
+    }
+
+    toggleFields();
+    fetchStats();
+    taskTypeSelect.addEventListener('change', function () {
+        toggleFields();
+        fetchStats();
+    });
+});
+</script>
+{% endblock %}

@@ -1,0 +1,15 @@
+{% extends "admin/change_form.html" %}
+
+{% block form_top %}
+    {% if action_buttons %}
+        {% for button in action_buttons %}
+            <a href="{{ button.url }}"
+               class="{{ button.class }}"
+               {% if button.style %}style="{{ button.style }}"{% endif %}
+               {% if button.onclick %}onclick="{{ button.onclick }}"{% endif %}>
+                {{ button.title }}
+            </a>
+        {% endfor %}
+    {% endif %}
+    {{ block.super }}
+{% endblock %}

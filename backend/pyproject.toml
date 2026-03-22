@@ -1,0 +1,58 @@
+[project]
+name = "backend"
+version = "0.1.0"
+requires-python = ">=3.14"
+
+dependencies = [
+    "Django==6.0.3",
+    "python-decouple==3.8",
+    "requests==2.32.5",
+    "psycopg2-binary==2.9.11",
+    "gunicorn==25.1.0",
+    "elasticsearch==8.19.3",
+    "elasticsearch-dsl==8.15.4",
+    "python-dateutil==2.9.0.post0",
+    "asgiref==3.11.1",
+    "certifi==2026.2.25",
+    "charset-normalizer==3.4.5",
+    "elastic-transport==8.17.1",
+    "idna==3.11",
+    "openpyxl==3.1.5",
+    "packaging==26.0",
+    "python-dateutil==2.9.0.post0",
+    "six==1.17.0",
+    "sqlparse==0.5.5",
+    "typing_extensions==4.15.0",
+    "urllib3==2.6.3",
+]
+
+[tool.setuptools]
+packages = []
+
+[project.optional-dependencies]
+dev = [
+    "django-extensions==4.1",
+    "autopep8==2.3.2", 
+    "ipython==9.11.0",
+    "python-dotenv==1.2.2",
+    "asttokens==3.0.1",
+    "decorator==5.2.1",
+    "executing==2.2.1",
+    "ipython_pygments_lexers==1.1.1",
+    "jedi==0.19.2",
+    "matplotlib-inline==0.2.1",
+    "parso==0.8.6",
+    "pexpect==4.9.0",
+    "prompt_toolkit==3.0.52",
+    "ptyprocess==0.7.0",
+    "pure_eval==0.2.3",
+    "pycodestyle==2.14.0",
+    "Pygments==2.19.2",
+    "stack-data==0.6.3",
+    "traitlets==5.14.3",
+    "wcwidth==0.6.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
