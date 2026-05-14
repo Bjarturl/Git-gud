@@ -1,57 +1,66 @@
 version: "3.9"
 
+x-backend-env: &backend_env
+  DB_HOST: postgres
+  DB_NAME: backend_db
+  DB_USER: backend_user
+  DB_PASSWORD: backend_password
+  DB_PORT: 5432
+  ELASTICSEARCH_HOST: elasticsearch
+  ELASTICSEARCH_PORT: 9200
+  DEBUG: "True"
+  SECRET_KEY: django-insecure-dev-key-for-devcontainer
+
+x-backend-base: &backend_base
+  build:
+    context: ..
+    dockerfile: .devcontainer/Dockerfile
+  volumes:
+    - ..:/app:cached
+  environment: *backend_env
+  depends_on:
+    postgres:
+      condition: service_healthy
+    elasticsearch:
+      condition: service_healthy
+
+x-worker-base: &worker_base
+  <<: *backend_base
+  working_dir: /app/backend
+  command: python manage.py run_task_worker --verbose
+  restart: unless-stopped
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+
 services:
   app:
-    build:
-      context: ..
-      dockerfile: .devcontainer/Dockerfile
-    volumes:
-      - ..:/app:cached
-    working_dir: /app
-    command: sleep infinity
+    <<: *backend_base
+    working_dir: /app/backend
+    command: python manage.py runserver 0.0.0.0:8000
     depends_on:
-      - postgres
-      - elasticsearch
-    environment:
-      DB_HOST: postgres
-      DB_NAME: backend_db
-      DB_USER: backend_user
-      DB_PASSWORD: backend_password
-      DB_PORT: 5432
-      ELASTICSEARCH_HOST: elasticsearch
-      ELASTICSEARCH_PORT: 9200
-      DEBUG: "True"
-      SECRET_KEY: django-insecure-dev-key-for-devcontainer
+      migrate:
+        condition: service_completed_successfully
     ports:
       - "8000:8000"
 
-  worker:
-    build:
-      context: ..
-      dockerfile: .devcontainer/Dockerfile
-    volumes:
-      - ..:/app:cached
-    working_dir: /app
-    depends_on:
-      postgres:
-        condition: service_healthy
-      elasticsearch:
-        condition: service_healthy
-    environment:
-      DB_HOST: postgres
-      DB_NAME: backend_db
-      DB_USER: backend_user
-      DB_PASSWORD: backend_password
-      DB_PORT: 5432
-      ELASTICSEARCH_HOST: elasticsearch
-      ELASTICSEARCH_PORT: 9200
-      DEBUG: "True"
-      SECRET_KEY: django-insecure-dev-key-for-devcontainer
-    command: >
-      bash -c "cd backend && 
-               python manage.py migrate &&
-               python manage.py run_task_worker --verbose"
-    restart: unless-stopped
+  migrate:
+    <<: *backend_base
+    working_dir: /app/backend
+    command: python manage.py migrate
+    restart: "no"
+
+  worker-1:
+    <<: *worker_base
+
+  worker-2:
+    <<: *worker_base
+
+  worker-3:
+    <<: *worker_base
+
+  worker-4:
+    <<: *worker_base
 
   postgres:
     image: postgres:16
@@ -65,7 +74,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U backend_user -d backend_db" ]
+      test: ["CMD-SHELL", "pg_isready -U backend_user -d backend_db"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -76,11 +85,13 @@ services:
     environment:
       - discovery.type=single-node
       - xpack.security.enabled=false
-      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    ports:
+      - "9200:9200"
     volumes:
       - esdata:/usr/share/elasticsearch/data
     healthcheck:
-      test: [ "CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1" ]
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -93,7 +104,8 @@ services:
     ports:
       - "5601:5601"
     depends_on:
-      - elasticsearch
+      elasticsearch:
+        condition: service_healthy
 
 volumes:
   pgdata:

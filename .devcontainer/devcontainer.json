@@ -9,7 +9,9 @@
   "postStartCommand": "bash .devcontainer/post-create.sh",
   "forwardPorts": [
     5432,
-    8000
+    8000,
+    9200,
+    5601
   ],
   "portsAttributes": {
     "5432": {
@@ -17,6 +19,12 @@
     },
     "8000": {
       "label": "Django Backend"
+    },
+    "9200": {
+      "label": "Elasticsearch"
+    },
+    "5601": {
+      "label": "Kibana"
     }
   },
   "customizations": {
