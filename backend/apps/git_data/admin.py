@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.contrib.admin import SimpleListFilter
 from django.db import connection
-from django.db.models import Q
+from django.db.models import Count, ExpressionWrapper, F, IntegerField, Q
 from django.http import JsonResponse
 from django.urls import path
 from django.utils.html import format_html
@@ -88,7 +88,7 @@ class UserRelationshipToInline(admin.TabularInline):
 @admin.register(User)
 class UserAdmin(ResetProcessedAtMixin, admin.ModelAdmin):
     list_display = ["status_actions", "username", "name",
-                    "location", "bio"]
+                    "location", "bio", "rels"]
     list_display_links = ["username"]
     list_filter = ["account_type", "status",
                    "discovery_method"]
@@ -261,6 +261,34 @@ class UserAdmin(ResetProcessedAtMixin, admin.ModelAdmin):
 
     def confirm_user(self, request, user_id):
         return self._update_user_status(request, user_id, UserStatus.CONFIRMED)
+
+    def get_queryset(self, request):
+        return (
+            super().get_queryset(request)
+            .annotate(
+                _outgoing_confirmed=Count(
+                    "outgoing_relationships",
+                    filter=Q(outgoing_relationships__to_user__status=UserStatus.CONFIRMED),
+                    distinct=True,
+                ),
+                _incoming_confirmed=Count(
+                    "incoming_relationships",
+                    filter=Q(incoming_relationships__from_user__status=UserStatus.CONFIRMED),
+                    distinct=True,
+                ),
+            )
+            .annotate(
+                _confirmed_rels=ExpressionWrapper(
+                    F("_outgoing_confirmed") + F("_incoming_confirmed"),
+                    output_field=IntegerField(),
+                ),
+            )
+        )
+
+    @admin.display(description="Rels", ordering="_confirmed_rels")
+    def rels(self, obj):
+        return obj._confirmed_rels
+
 
     def get_readonly_fields(self, request, obj=None):
         return [field.name for field in self.model._meta.fields] + ["matches_table"]
