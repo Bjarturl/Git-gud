@@ -124,9 +124,6 @@ class GitHubAPIClient:
         current_time = int(time.time())
         wait_time = max(1, int(earliest_reset_time) - current_time + 10)
 
-        if wait_time > 3600:
-            raise Exception(
-                f"Rate limit wait time too long: {wait_time} seconds")
 
         self.github_logger.warning("ALL TOKENS RATE LIMITED")
         self.github_logger.warning(

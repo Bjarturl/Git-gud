@@ -84,8 +84,8 @@ class UserRelationshipToInline(admin.TabularInline):
 
 @admin.register(User)
 class UserAdmin(ResetProcessedAtMixin, admin.ModelAdmin):
-    list_display = ["username", "name",
-                    "location", "bio", "status_actions"]
+    list_display = ["status_actions", "username", "name",
+                    "location", "bio"]
     list_filter = ["account_type", "status",
                    "discovery_method"]
     search_fields = ["username", "name", "email"]
@@ -112,63 +112,68 @@ class UserAdmin(ResetProcessedAtMixin, admin.ModelAdmin):
 
     @admin.display(description="Actions")
     def status_actions(self, obj):
-        # Show both buttons if UNKNOWN, only hide if CONFIRMED, only confirm if HIDDEN
+        eye_btn = format_html(
+            """
+            <a href="{}" target="_blank"
+            style="display:flex; align-items:center; justify-content:center;
+                    text-decoration:none;
+                    background:#0d6efd; color:white;
+                    width:28px; height:28px; border-radius:4px;">
+                👁
+            </a>
+            """,
+            obj.url or "#",
+        )
+
         if obj.status == UserStatus.UNKNOWN:
-            buttons = format_html(
+            return format_html(
                 """
-                <button type="button"
-                        class="status-btn confirm-btn"
-                        data-user-id="{0}"
-                        onclick="confirmUser(this, {0})"
-                        style="border:none; background:#28a745; color:white;
-                            width:28px; height:28px; border-radius:4px; cursor:pointer;">
-                    ✓
-                </button>
-                <button type="button"
-                        class="status-btn hide-btn"
-                        data-user-id="{0}"
-                        onclick="hideUser(this, {0})"
-                        style="border:none; background:#dc3545; color:white;
-                            width:28px; height:28px; border-radius:4px; cursor:pointer;">
-                    ✕
-                </button>
+                <div style="display: flex; gap: 6px;">
+                    <button type="button"
+                            class="status-btn confirm-btn"
+                            data-user-id="{0}"
+                            onclick="confirmUser(this, {0})"
+                            style="border:none; background:#28a745; color:white;
+                                width:28px; height:28px; border-radius:4px; cursor:pointer;">
+                        ✓
+                    </button>
+                    {1}
+                    <button type="button"
+                            class="status-btn hide-btn"
+                            data-user-id="{0}"
+                            onclick="hideUser(this, {0})"
+                            style="border:none; background:#dc3545; color:white;
+                                width:28px; height:28px; border-radius:4px; cursor:pointer;">
+                        ✕
+                    </button>
+                </div>
                 """,
                 obj.id,
+                eye_btn,
             )
         elif obj.status == UserStatus.HIDDEN:
-            buttons = format_html(
+            return format_html(
                 """
-                <button type="button"
-                        class="status-btn confirm-btn"
-                        data-user-id="{0}"
-                        onclick="confirmUser(this, {0})"
-                        style="border:none; background:#28a745; color:white;
-                            width:28px; height:28px; border-radius:4px; cursor:pointer;">
-                    ✓
-                </button>
+                <div style="display: flex; gap: 6px;">
+                    <button type="button"
+                            class="status-btn confirm-btn"
+                            data-user-id="{0}"
+                            onclick="confirmUser(this, {0})"
+                            style="border:none; background:#28a745; color:white;
+                                width:28px; height:28px; border-radius:4px; cursor:pointer;">
+                        ✓
+                    </button>
+                    {1}
+                </div>
                 """,
                 obj.id,
+                eye_btn,
             )
         else:
-            buttons = ""
-
-        return format_html(
-            """
-            <div style="display: flex; gap: 6px;">
-                <a href="{1}" target="_blank"
-                style="display:flex; align-items:center; justify-content:center;
-                        text-decoration:none;
-                        background:#0d6efd; color:white;
-                        width:28px; height:28px; border-radius:4px;">
-                    👁
-                </a>
-                {2}
-            </div>
-            """,
-            obj.id,
-            obj.url or "#",
-            buttons,
-        )
+            return format_html(
+                '<div style="display: flex; gap: 6px;">{}</div>',
+                eye_btn,
+            )
 
     def get_urls(self):
         return [

@@ -29,12 +29,11 @@ def _get_user_queryset(user_filter: str):
     queryset = User.objects.all()
 
     if user_filter == "confirmed":
-        return queryset.filter(status=UserStatus.CONFIRMED)
+        queryset = queryset.filter(status=UserStatus.CONFIRMED)
+    elif user_filter != "all":
+        queryset = queryset.filter(status=user_filter)
 
-    if user_filter == "all":
-        return queryset
-
-    return queryset.filter(status=user_filter)
+    return queryset.filter(processed_at__isnull=True)
 
 
 def _claim_next_user_batch(worker, user_filter: str, logger, batch_size: int = CLAIM_BATCH_SIZE) -> list[int]:
