@@ -1,10 +1,13 @@
 from django.contrib import admin
 from django.contrib.admin import SimpleListFilter
 from django.db import connection
+from django.db.models import Q
 from django.http import JsonResponse
 from django.urls import path
 from django.utils.html import format_html
+from django.utils.safestring import mark_safe
 
+from apps.search.models import Match
 from .mixins import ResetProcessedAtMixin
 
 from .models import Commit, Gist, Repo, User, UserRelationship, UserStatus
@@ -86,6 +89,7 @@ class UserRelationshipToInline(admin.TabularInline):
 class UserAdmin(ResetProcessedAtMixin, admin.ModelAdmin):
     list_display = ["status_actions", "username", "name",
                     "location", "bio"]
+    list_display_links = ["username"]
     list_filter = ["account_type", "status",
                    "discovery_method"]
     search_fields = ["username", "name", "email"]
@@ -104,6 +108,9 @@ class UserAdmin(ResetProcessedAtMixin, admin.ModelAdmin):
         ("Timestamps", {
             "fields": ["created_at", "processed_at", "source_created_at"],
             "classes": ["collapse"],
+        }),
+        ("Matches", {
+            "fields": ["matches_table"],
         }),
     ]
 
@@ -175,6 +182,64 @@ class UserAdmin(ResetProcessedAtMixin, admin.ModelAdmin):
                 eye_btn,
             )
 
+    @admin.display(description="Matches")
+    def matches_table(self, obj):
+        matches = (
+            Match.objects
+            .filter(Q(commit__author=obj) | Q(gist__author=obj))
+            .select_related("regex", "commit", "commit__repo", "gist")
+            .order_by("-created_at")[:500]
+        )
+
+        if not matches:
+            return "No matches found."
+
+        rows = []
+        for m in matches:
+            if m.commit:
+                source = format_html(
+                    '<a href="{}" target="_blank">{}</a>',
+                    m.commit.url or "#",
+                    f"{m.commit.repo.full_name}@{m.commit.sha[:7]}",
+                )
+            else:
+                source = format_html(
+                    '<a href="{}" target="_blank">gist:{}</a>',
+                    m.gist.url or "#",
+                    m.gist.gist_id[:8],
+                )
+
+            rows.append(format_html(
+                "<tr>"
+                "<td style='padding:4px 8px'>{}</td>"
+                "<td style='padding:4px 8px'>{}</td>"
+                "<td style='padding:4px 8px'><code>{}</code></td>"
+                "<td style='padding:4px 8px'>{}</td>"
+                "<td style='padding:4px 8px'>{}</td>"
+                "</tr>",
+                m.regex.name or m.regex.regex_pattern[:40],
+                m.match_type,
+                m.match[:100],
+                m.filename or "—",
+                source,
+            ))
+
+        header = mark_safe(
+            "<thead><tr>"
+            "<th style='text-align:left;padding:4px 8px;border-bottom:1px solid #ddd'>Regex</th>"
+            "<th style='text-align:left;padding:4px 8px;border-bottom:1px solid #ddd'>Type</th>"
+            "<th style='text-align:left;padding:4px 8px;border-bottom:1px solid #ddd'>Match</th>"
+            "<th style='text-align:left;padding:4px 8px;border-bottom:1px solid #ddd'>File</th>"
+            "<th style='text-align:left;padding:4px 8px;border-bottom:1px solid #ddd'>Source</th>"
+            "</tr></thead>"
+        )
+
+        return format_html(
+            "<table style='width:100%;border-collapse:collapse'>{}<tbody>{}</tbody></table>",
+            header,
+            mark_safe("".join(rows)),
+        )
+
     def get_urls(self):
         return [
             path("hide-user/<int:user_id>/",
@@ -198,7 +263,7 @@ class UserAdmin(ResetProcessedAtMixin, admin.ModelAdmin):
         return self._update_user_status(request, user_id, UserStatus.CONFIRMED)
 
     def get_readonly_fields(self, request, obj=None):
-        return [field.name for field in self.model._meta.fields]
+        return [field.name for field in self.model._meta.fields] + ["matches_table"]
 
 
 @admin.register(Repo)

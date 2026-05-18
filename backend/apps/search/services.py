@@ -220,7 +220,7 @@ class ElasticsearchService:
             query = {
                 "range": {
                     "timestamp": {
-                        "gte": timestamp,
+                        "gt": timestamp,
                     }
                 }
             }

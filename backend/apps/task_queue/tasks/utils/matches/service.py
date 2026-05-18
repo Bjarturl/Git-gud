@@ -216,15 +216,18 @@ def _process_regex(
             scanned_count += 1
             continue
 
-        filename = source.get("filename", "")
-        additions = source.get("additions", "") or ""
-        deletions = source.get("deletions", "") or ""
+        _advance_regex_checkpoint(regex_id=regex.id, timestamp=timestamp)
+        last_processed_at = timestamp
+        scanned_count += 1
 
         commit, gist = _resolve_source(source)
         if not commit and not gist:
             skipped_count += 1
-            scanned_count += 1
             continue
+
+        filename = source.get("filename", "")
+        additions = source.get("additions", "") or ""
+        deletions = source.get("deletions", "") or ""
 
         created_count += _create_matches_for_document(
             regex=regex,
@@ -235,13 +238,6 @@ def _process_regex(
             additions=additions,
             deletions=deletions,
         )
-
-        _advance_regex_checkpoint(
-            regex_id=regex.id,
-            timestamp=timestamp,
-        )
-        last_processed_at = timestamp
-        scanned_count += 1
 
         if scanned_count % PROGRESS_LOG_EVERY == 0:
             logger.info(
