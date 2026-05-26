@@ -1,6 +1,7 @@
-import time
 from typing import List, Tuple
 
+import requests as requests_lib
+from django.db import reset_queries
 from django.utils import timezone
 
 from apps.search.services import ElasticsearchService
@@ -64,6 +65,32 @@ def _extract_patch_changes(patch: str) -> Tuple[str, str]:
     return "\n".join(additions), "\n".join(deletions)
 
 
+GITHUB_FILE_CAP = 300
+MAX_CONTENT_BYTES = 8_000_000  # skip files whose diff content exceeds 8 MB
+
+
+def _parse_raw_diff_files(diff_text: str) -> list:
+    """Split a raw unified diff into per-file dicts with filename + patch."""
+    files = []
+    current_filename = None
+    patch_lines = []
+
+    for line in diff_text.splitlines():
+        if line.startswith("diff --git "):
+            if current_filename is not None:
+                files.append({"filename": current_filename, "patch": "\n".join(patch_lines)})
+            parts = line.split(" b/", 1)
+            current_filename = parts[1] if len(parts) == 2 else None
+            patch_lines = []
+        elif current_filename is not None:
+            patch_lines.append(line)
+
+    if current_filename is not None:
+        files.append({"filename": current_filename, "patch": "\n".join(patch_lines)})
+
+    return files
+
+
 def _build_commit_file_doc(commit: Commit, file_data: dict) -> Tuple[str, dict] | Tuple[None, None]:
     filename = file_data.get("filename")
     if not filename:
@@ -80,10 +107,13 @@ def _build_commit_file_doc(commit: Commit, file_data: dict) -> Tuple[str, dict] 
     if not additions and not deletions and not is_binary:
         return None, None
 
+    if len(additions) + len(deletions) > MAX_CONTENT_BYTES:
+        return None, None
+
     doc_id = f"commit:{commit.repo_id}:{commit.sha}:{filename}"
     doc_data = {
-        "user": commit.author.username if commit.author else "unknown",
-        "user_company": commit.author.company if commit.author and commit.author.company else "",
+        "user": commit.repo.owner.username,
+        "user_company": commit.repo.owner.company or "",
         "repo": commit.repo.name,
         "repo_owner": commit.repo.owner.username,
         "repo_owner_company": commit.repo.owner.company,
@@ -109,27 +139,56 @@ def _index_commit_code(
     logger,
 ) -> int | None:
     try:
-        if not es_service.is_available():
-            return None
-
         repo_owner, repo_name = commit.repo.full_name.split("/", 1)
         commit_details = client.get_commit_details(repo_owner, repo_name, commit.sha)
         if not commit_details:
             logger.warning(f"Could not fetch details for commit {commit.sha}")
             return None
 
-        indexed_files = 0
+        files = commit_details.get("files", [])
 
-        for file_data in commit_details.get("files", []):
+        null_patch_count = sum(
+            1 for f in files
+            if f.get("patch") is None
+            and not is_binary_filename(f.get("filename", ""))
+            and (f.get("additions", 0) or f.get("deletions", 0))
+        )
+        needs_raw_diff = len(files) >= GITHUB_FILE_CAP or null_patch_count
+        if needs_raw_diff:
+            raw_diff = client.get_commit_diff(repo_owner, repo_name, commit.sha)
+            if raw_diff:
+                files = _parse_raw_diff_files(raw_diff)
+                if null_patch_count:
+                    logger.info(
+                        f"Commit {commit.sha[:8]} had {null_patch_count} null patches — "
+                        f"re-fetched raw diff ({len(files)} files)"
+                    )
+                else:
+                    logger.info(
+                        f"Commit {commit.sha[:8]} hit {GITHUB_FILE_CAP}-file cap — "
+                        f"re-fetched raw diff ({len(files)} files)"
+                    )
+            else:
+                logger.warning(
+                    f"Commit {commit.sha[:8]} needs raw diff but fetch failed — will retry"
+                )
+                return None
+
+        docs = []
+        for file_data in files:
             doc_id, doc_data = _build_commit_file_doc(commit, file_data)
-            if not doc_id:
-                continue
+            if doc_id:
+                docs.append((doc_id, doc_data))
 
-            if es_service.index_document(doc_data, doc_id):
-                indexed_files += 1
+        return es_service.bulk_index_documents(docs)
 
-        time.sleep(0.1)
-        return indexed_files
+    except requests_lib.exceptions.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else None
+        if status == 404:
+            logger.warning(f"Commit {commit.sha[:8]} not found (404) — repo likely privated, marking processed")
+            return 0
+        logger.error(f"HTTP {status} error indexing commit {commit.sha}: {exc}", exc_info=True)
+        return None
 
     except Exception as exc:
         logger.error(f"Error indexing commit {commit.sha}: {exc}", exc_info=True)
@@ -178,9 +237,11 @@ def process_commits(
 
             logger.info(f"Processing commit {commit.sha[:8]} in {commit.repo.full_name}")
 
-            indexed_files = _index_commit_code(commit, client, es_service, logger) or 0
-            indexed_count += indexed_files
+            result = _index_commit_code(commit, client, es_service, logger)
+            if result is None:
+                continue
 
+            indexed_count += result
             commit.processed_at = timezone.now()
             commit.save(update_fields=["processed_at"])
             processed_count += 1
@@ -188,6 +249,7 @@ def process_commits(
 
             if processed_since_refresh >= CLAIM_REFRESH_EVERY:
                 refresh_worker_claims(worker)
+                reset_queries()
                 processed_since_refresh = 0
 
     finally:

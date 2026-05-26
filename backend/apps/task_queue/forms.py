@@ -11,7 +11,7 @@ class AddTaskForm(forms.Form):
         ("apps.task_queue.tasks.find_matches_task", "Find Matches"),
         ("apps.task_queue.tasks.get_raw_events_task", "Get Raw Events"),
         ("apps.task_queue.tasks.sync_event_commits_task", "Sync Event Commits"),
-
+        ("apps.task_queue.tasks.multi_pipeline_task", "Full Pipeline"),
     ]
 
     task_type = forms.ChoiceField(
@@ -24,6 +24,12 @@ class AddTaskForm(forms.Form):
         max_length=500,
         required=False,
         label="Search Query",
+    )
+
+    usernames = forms.CharField(
+        required=False,
+        label="GitHub Usernames",
+        widget=forms.Textarea(attrs={"rows": 5, "placeholder": "torvalds\ngvanrossum\ndjango"}),
     )
 
     set_user_status = forms.ChoiceField(
@@ -44,5 +50,12 @@ class AddTaskForm(forms.Form):
         if task_type == "apps.task_queue.tasks.user_discovery_task":
             if not cleaned_data.get("search_query"):
                 self.add_error("search_query", "Search query is required.")
+
+        if task_type == "apps.task_queue.tasks.multi_pipeline_task":
+            usernames = [u.strip() for u in (cleaned_data.get("usernames") or "").splitlines() if u.strip()]
+            if not usernames:
+                self.add_error("usernames", "At least one GitHub username is required.")
+            else:
+                cleaned_data["usernames_list"] = usernames
 
         return cleaned_data

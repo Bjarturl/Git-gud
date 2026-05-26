@@ -1,15 +1,42 @@
-import re
+import logging
+import regex
+import time
 from typing import Optional
 
-from django.db import IntegrityError
+from dateutil import parser as dateutil_parser
+from django.db import IntegrityError, reset_queries, transaction
+
+logger = logging.getLogger(__name__)
 
 from apps.git_data.models import Commit, Gist
-from apps.search.models import Match, MatchType, Regex
+from apps.search.models import Match, MatchStatus, Regex
 from apps.search.services import ElasticsearchService
 from apps.task_queue.tasks.utils.jobs import is_cancelled
 
 
 PROGRESS_LOG_EVERY = 100
+CHECKPOINT_FLUSH_EVERY = 100
+MAX_ADDITIONS_BYTES = 500_000
+MAX_LINE_LENGTH = 2_000
+REGEX_TIMEOUT_SECS = 3.0
+
+_IGNORED_PATH_SEGMENTS = frozenset([
+    "node_modules",
+    "venv",
+    ".venv",
+    "virtualenv",
+    "site-packages",
+    ".tox",
+    "vendor",
+    "bower_components",
+])
+
+
+def _is_ignored_filename(filename: str) -> bool:
+    if not filename:
+        return False
+    parts = filename.replace("\\", "/").split("/")
+    return any(p in _IGNORED_PATH_SEGMENTS for p in parts)
 
 
 def _get_active_regexes():
@@ -25,18 +52,52 @@ def _regex_label(regex: Regex) -> str:
     return f"{regex.id}:{regex.name or '<unnamed>'}"
 
 
-def _compile_pattern(regex: Regex):
+def _compile_pattern(rx: Regex):
     try:
-        return re.compile(regex.regex_pattern), None
-    except re.error as exc:
+        return regex.compile(rx.regex_pattern), None
+    except regex.error as exc:
         return None, str(exc)
+
+
+def _get_active_regexes_compiled(logger):
+    result = []
+    for rx in _get_active_regexes():
+        compiled, error = _compile_pattern(rx)
+        if compiled is None:
+            logger.warning(f"Skipping regex {_regex_label(rx)}: {error}")
+            continue
+        result.append((rx, compiled))
+    return result
+
+
+def _min_checkpoint(regexes):
+    checkpoints = [r.last_processed_at for r in regexes]
+    if any(cp is None for cp in checkpoints):
+        return None
+    return min(checkpoints)
+
+
+def _flush_checkpoints(latest_ts: dict):
+    for regex_id, ts in latest_ts.items():
+        Regex.objects.filter(id=regex_id).update(last_processed_at=ts)
+
+
+def _parse_es_timestamp(value):
+    if value is None:
+        return None
+    if hasattr(value, "year"):
+        return value
+    try:
+        return dateutil_parser.parse(value)
+    except Exception:
+        return None
 
 
 def _get_commit_from_source(source: dict) -> Optional[Commit]:
     sha = source.get("source_id")
-    repo_full_name = source.get("repo")
+    repo_name = source.get("repo")
 
-    if not sha or not repo_full_name:
+    if not sha or not repo_name:
         return None
 
     return (
@@ -44,7 +105,7 @@ def _get_commit_from_source(source: dict) -> Optional[Commit]:
         .select_related("repo")
         .filter(
             sha=sha,
-            repo__full_name=repo_full_name,
+            repo__name=repo_name,
         )
         .first()
     )
@@ -81,244 +142,300 @@ def _resolve_source(source: dict):
 
 def _extract_line_matches(compiled_pattern, content: str):
     if not content or compiled_pattern is None:
-        return []
+        return [], False
 
+    deadline = time.monotonic() + REGEX_TIMEOUT_SECS
     results = []
     seen = set()
 
     for line in content.splitlines():
-        for match in compiled_pattern.finditer(line):
-            value = match.group(0)
-            key = (value, line)
-            if key in seen:
-                continue
-            seen.add(key)
-            results.append((value, line))
+        if len(line) > MAX_LINE_LENGTH:
+            continue
 
-    return results
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return results, True
+
+        try:
+            for match in compiled_pattern.finditer(line, timeout=remaining):
+                value = match.group(0)
+                key = (value, line)
+                if key in seen:
+                    continue
+                seen.add(key)
+                results.append((value, line))
+        except TimeoutError:
+            return results, True
+
+    return results, False
 
 
-def _create_match(regex, commit, gist, match_type, value, raw_line, filename):
+def _find_deletions_batch(es_service, values: list) -> dict:
+    """Return {value: (commit_or_None, gist_or_None)} for a list of values via msearch."""
+    if not values:
+        return {}
+    body = []
+    for value in values:
+        body.append({"index": es_service._index_name})
+        body.append({
+            "query": {"match_phrase": {"deletions": value}},
+            "sort": [{"date": "asc"}],
+            "size": 1,
+            "_source": ["source_id", "repo", "type"],
+        })
     try:
-        Match.objects.create(
-            regex=regex,
-            commit=commit,
-            gist=gist,
-            match_type=match_type,
-            match=value,
-            raw_match=raw_line,
-            filename=filename or "",
-        )
-        return 1
-    except IntegrityError:
+        responses = es_service._client.msearch(body=body)
+    except Exception:
+        return {v: (None, None) for v in values}
+
+    result = {}
+    for value, resp in zip(values, responses.get("responses", [])):
+        if resp.get("error"):
+            result[value] = (None, None)
+            continue
+        hits = resp.get("hits", {}).get("hits", [])
+        result[value] = _resolve_source(hits[0]["_source"]) if hits else (None, None)
+    return result
+
+
+def _create_matches_for_document(compiled_regexes, commit, gist, filename, additions, es_service):
+    """
+    Process all regexes for one document in a single pass, batching ES and DB lookups.
+    compiled_regexes: list of (regex, compiled_pattern)
+    """
+    if _is_ignored_filename(filename):
         return 0
 
+    if len(additions) > MAX_ADDITIONS_BYTES:
+        logger.warning(
+            f"Skipping oversized document: {filename!r} ({len(additions)}b > {MAX_ADDITIONS_BYTES}b)"
+        )
+        return 0
 
-def _create_matches_for_document(regex, compiled_pattern, commit, gist, filename, additions, deletions):
+    # Collect all candidates across every regex
+    candidates = []
+    for rx, compiled_pattern in compiled_regexes:
+        line_matches, timed_out = _extract_line_matches(compiled_pattern, additions)
+        if timed_out:
+            logger.warning(
+                f"Regex {_regex_label(rx)} timed out after {REGEX_TIMEOUT_SECS}s "
+                f"on {filename!r} ({len(additions)}b)"
+            )
+        for value, raw_line in line_matches:
+            candidates.append((rx, value, raw_line))
+
+    if not candidates:
+        return 0
+
+    unique_values = list({v for _, v, _ in candidates})
+
+    # One ES msearch for all deletion lookups
+    deletions = _find_deletions_batch(es_service, unique_values)
+
+    # One DB query for all false positive statuses
+    fp_values = set(
+        Match.objects
+        .filter(match__in=unique_values, status=MatchStatus.FALSE_POSITIVE)
+        .values_list("match", flat=True)
+        .distinct()
+    )
+
     created = 0
+    for rx, value, raw_line in candidates:
+        status = MatchStatus.FALSE_POSITIVE if value in fp_values else MatchStatus.NONE
+        deleted_in_commit, deleted_in_gist = deletions.get(value, (None, None))
 
-    for value, raw_line in _extract_line_matches(compiled_pattern, additions):
-        created += _create_match(
-            regex=regex,
-            commit=commit,
-            gist=gist,
-            match_type=MatchType.ADDITION,
-            value=value,
-            raw_line=raw_line,
-            filename=filename,
-        )
-
-    for value, raw_line in _extract_line_matches(compiled_pattern, deletions):
-        created += _create_match(
-            regex=regex,
-            commit=commit,
-            gist=gist,
-            match_type=MatchType.DELETION,
-            value=value,
-            raw_line=raw_line,
-            filename=filename,
-        )
+        try:
+            with transaction.atomic():
+                Match.objects.create(
+                    regex=rx,
+                    commit=commit,
+                    gist=gist,
+                    repo=commit.repo if commit else None,
+                    gist_base_id=gist.gist_id if gist else None,
+                    match=value,
+                    raw_match=raw_line,
+                    filename=filename or "",
+                    status=status,
+                    deleted_in_commit=deleted_in_commit,
+                    deleted_in_gist=deleted_in_gist,
+                )
+            created += 1
+        except IntegrityError:
+            pass
 
     return created
 
 
-def _get_document_timestamp(source: dict):
-    return source.get("timestamp")
+def _scan_global(es_service, compiled_regexes, logger, job_id):
+    regexes = [r for r, _ in compiled_regexes]
+    min_cp = _min_checkpoint(regexes)
 
-
-def _advance_regex_checkpoint(regex_id: int, timestamp):
-    Regex.objects.filter(id=regex_id).update(last_processed_at=timestamp)
-
-
-def _process_regex(
-    es_service,
-    regex: Regex,
-    regex_number: int,
-    regex_total: int,
-    logger,
-    job_id: Optional[str],
-):
-    compiled_pattern, compile_error = _compile_pattern(regex)
-    regex_name = _regex_label(regex)
-
-    if compiled_pattern is None:
-        logger.warning(
-            f"Skipping regex {regex_number}/{regex_total} [{regex_name}] due to invalid pattern: {compile_error}"
-        )
-        return {
-            "scanned": 0,
-            "created": 0,
-            "skipped": 0,
-            "eligible_total": 0,
-            "cancelled": False,
-        }
-
-    eligible_total = es_service.count_documents_from_timestamp(
-        timestamp=regex.last_processed_at,
+    eligible_total = es_service.count_documents_from_timestamp(timestamp=min_cp)
+    logger.info(
+        f"Global scan: regexes={len(compiled_regexes)}, "
+        f"checkpoint={min_cp or 'beginning'}, eligible={eligible_total}"
     )
+
+    scanned = 0
+    created = 0
+    skipped = 0
+    latest_ts = {}
+    cancelled = False
+
+    try:
+        for hit in es_service.scan_documents_from_timestamp(timestamp=min_cp):
+            if is_cancelled(job_id):
+                cancelled = True
+                logger.warning(
+                    f"Global scan cancelled: scanned={scanned}/{eligible_total}, "
+                    f"matches_created={created}, skipped={skipped}"
+                )
+                break
+
+            source = hit.get("_source", {})
+            if not source:
+                skipped += 1
+                scanned += 1
+                continue
+
+            ts = _parse_es_timestamp(source.get("timestamp"))
+            if ts is None:
+                skipped += 1
+                scanned += 1
+                continue
+
+            scanned += 1
+
+            eligible = [
+                (r, p) for r, p in compiled_regexes
+                if r.last_processed_at is None or r.last_processed_at < ts
+            ]
+
+            if not eligible:
+                continue
+
+            commit, gist = _resolve_source(source)
+            if not commit and not gist:
+                skipped += 1
+                continue
+
+            filename = source.get("filename", "")
+            additions = source.get("additions", "") or ""
+            source_id = source.get("source_id", "")
+
+            t0 = time.monotonic()
+            created += _create_matches_for_document(
+                compiled_regexes=eligible,
+                commit=commit,
+                gist=gist,
+                filename=filename,
+                additions=additions,
+                es_service=es_service,
+            )
+            elapsed = time.monotonic() - t0
+            if elapsed > 2:
+                logger.warning(
+                    f"Slow document: {filename!r} took {elapsed:.1f}s "
+                    f"(source_id={source_id!r}, additions={len(additions)}b)"
+                )
+
+            for regex, _ in eligible:
+                if regex.id not in latest_ts or latest_ts[regex.id] < ts:
+                    latest_ts[regex.id] = ts
+
+            if scanned % CHECKPOINT_FLUSH_EVERY == 0:
+                _flush_checkpoints(latest_ts)
+                reset_queries()
+                logger.info(
+                    f"Global scan progress: scanned={scanned}/{eligible_total}, "
+                    f"matches_created={created}, skipped={skipped}"
+                )
+
+    finally:
+        _flush_checkpoints(latest_ts)
 
     logger.info(
-        f"Regex {regex_number}/{regex_total} [{regex_name}] starting: "
-        f"checkpoint={regex.last_processed_at or 'beginning'}, "
-        f"eligible={eligible_total}, "
+        f"Global scan complete: scanned={scanned}/{eligible_total}, "
+        f"matches_created={created}, skipped={skipped}"
     )
 
-    scanned_count = 0
-    created_count = 0
-    skipped_count = 0
-    cancelled = False
-    last_processed_at = regex.last_processed_at
 
-    hits = es_service.scan_documents_from_timestamp(
-        timestamp=regex.last_processed_at,
+def _scan_for_user(es_service, compiled_regexes, username, logger, job_id):
+    eligible_total = es_service.count_documents_from_timestamp(username=username)
+    logger.info(
+        f"User scan: user={username}, regexes={len(compiled_regexes)}, eligible={eligible_total}"
     )
 
-    for hit in hits:
+    scanned = 0
+    created = 0
+    skipped = 0
 
+    for hit in es_service.scan_documents_from_timestamp(username=username):
         if is_cancelled(job_id):
-            cancelled = True
             logger.warning(
-                f"Regex {regex_number}/{regex_total} [{regex_name}] cancelled: "
-                f"scanned={scanned_count}/{eligible_total}, "
-                f"matches_created={created_count}, skipped={skipped_count}"
+                f"User scan cancelled: scanned={scanned}/{eligible_total}, "
+                f"matches_created={created}, skipped={skipped}"
             )
             break
 
         source = hit.get("_source", {})
         if not source:
-            skipped_count += 1
-            scanned_count += 1
+            skipped += 1
+            scanned += 1
             continue
 
-        timestamp = _get_document_timestamp(source)
-        if timestamp is None:
-            skipped_count += 1
-            scanned_count += 1
-            continue
-
-        _advance_regex_checkpoint(regex_id=regex.id, timestamp=timestamp)
-        last_processed_at = timestamp
-        scanned_count += 1
+        scanned += 1
 
         commit, gist = _resolve_source(source)
         if not commit and not gist:
-            skipped_count += 1
+            skipped += 1
             continue
 
         filename = source.get("filename", "")
         additions = source.get("additions", "") or ""
-        deletions = source.get("deletions", "") or ""
+        source_id = source.get("source_id", "")
 
-        created_count += _create_matches_for_document(
-            regex=regex,
-            compiled_pattern=compiled_pattern,
+        t0 = time.monotonic()
+        created += _create_matches_for_document(
+            compiled_regexes=compiled_regexes,
             commit=commit,
             gist=gist,
             filename=filename,
             additions=additions,
-            deletions=deletions,
+            es_service=es_service,
         )
+        elapsed = time.monotonic() - t0
+        if elapsed > 2:
+            logger.warning(
+                f"Slow document: {filename!r} took {elapsed:.1f}s "
+                f"(source_id={source_id!r}, additions={len(additions)}b)"
+            )
 
-        if scanned_count % PROGRESS_LOG_EVERY == 0:
+        if scanned % PROGRESS_LOG_EVERY == 0:
+            reset_queries()
             logger.info(
-                f"Regex {regex_number}/{regex_total} [{regex_name}] progress: "
-                f"scanned={scanned_count}/{eligible_total}, "
-                f"matches_created={created_count}, skipped={skipped_count}, "
-                f"last_processed_at={last_processed_at}"
+                f"User scan progress: scanned={scanned}/{eligible_total}, "
+                f"matches_created={created}, skipped={skipped}"
             )
 
     logger.info(
-        f"Regex {regex_number}/{regex_total} [{regex_name}] finished: "
-        f"scanned={scanned_count}/{eligible_total}, "
-        f"matches_created={created_count}, skipped={skipped_count}, "
-        f"last_processed_at={last_processed_at or 'unchanged'}"
+        f"User scan complete: user={username}, scanned={scanned}/{eligible_total}, "
+        f"matches_created={created}, skipped={skipped}"
     )
 
-    return {
-        "scanned": scanned_count,
-        "created": created_count,
-        "skipped": skipped_count,
-        "eligible_total": eligible_total,
-        "cancelled": cancelled,
-    }
 
-
-def find_matches(
-    logger,
-    job_id: Optional[str],
-):
+def find_matches(logger, job_id: Optional[str], username: Optional[str] = None):
     es_service = ElasticsearchService()
     if not es_service.is_available():
         raise Exception("Elasticsearch is not available")
 
-    regexes = _get_active_regexes()
-    if not regexes:
-        logger.warning("No active regexes found")
+    compiled_regexes = _get_active_regexes_compiled(logger)
+    if not compiled_regexes:
+        logger.warning("No active regexes found (or all failed to compile)")
         return
 
-    total_scanned = 0
-    total_created = 0
-    total_skipped = 0
-    total_eligible = 0
-
-    logger.info(
-        f"Starting match scan: regexes={len(regexes)}"
-    )
-
-    for index, regex in enumerate(regexes, start=1):
-        if is_cancelled(job_id):
-            logger.warning(
-                f"Match scan cancelled before regex {index}/{len(regexes)}: "
-                f"scanned={total_scanned}, eligible={total_eligible}, "
-                f"matches_created={total_created}, skipped={total_skipped}"
-            )
-            break
-
-        result = _process_regex(
-            es_service=es_service,
-            regex=regex,
-            regex_number=index,
-            regex_total=len(regexes),
-            logger=logger,
-            job_id=job_id,
-        )
-
-        total_scanned += result["scanned"]
-        total_created += result["created"]
-        total_skipped += result["skipped"]
-        total_eligible += result["eligible_total"]
-
-        logger.info(
-            f"Overall progress after regex {index}/{len(regexes)}: "
-            f"scanned={total_scanned}/{total_eligible}, "
-            f"matches_created={total_created}, skipped={total_skipped}"
-        )
-
-        if result["cancelled"]:
-            break
-
-    logger.info(
-        f"Match scan complete: scanned={total_scanned}/{total_eligible}, "
-        f"matches_created={total_created}, skipped={total_skipped}, "
-        f"regexes={len(regexes)}"
-    )
+    if username:
+        _scan_for_user(es_service, compiled_regexes, username, logger, job_id)
+    else:
+        _scan_global(es_service, compiled_regexes, logger, job_id)

@@ -51,7 +51,7 @@ class User(models.Model):
     )
 
     name = models.CharField(max_length=255, null=True, blank=True)
-    email = models.EmailField(null=True, blank=True)
+    email = models.CharField(max_length=4096, null=True, blank=True)
     avatar = models.URLField(null=True, blank=True)
     bio = models.TextField(null=True, blank=True)
     company = models.CharField(max_length=4096, null=True, blank=True)
@@ -59,6 +59,7 @@ class User(models.Model):
     url = models.URLField()
 
     processed_at = models.DateTimeField(null=True, blank=True)
+    scanned_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(default=timezone.now)
     source_created_at = models.DateTimeField(null=True, blank=True)
 
@@ -185,6 +186,7 @@ class Gist(models.Model):
     description = models.TextField(null=True, blank=True)
     filenames = ArrayField(models.CharField(
         max_length=4096), default=list, blank=True)
+    is_fork = models.BooleanField(default=False)
 
     created_at = models.DateTimeField(default=timezone.now)
     processed_at = models.DateTimeField(null=True, blank=True)

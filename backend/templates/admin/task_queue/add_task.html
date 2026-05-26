@@ -71,6 +71,18 @@
             {{ form.set_user_status.errors }}
         </div>
 
+        <div id="pipeline-fields">
+            <label for="{{ form.usernames.id_for_label }}">GitHub Usernames (one per line)</label>
+            <textarea
+                id="{{ form.usernames.id_for_label }}"
+                name="{{ form.usernames.name }}"
+                rows="5"
+                placeholder="torvalds&#10;gvanrossum&#10;django"
+                style="width:100%;font-family:monospace;margin-bottom:12px"
+            >{{ form.usernames.value|default_if_none:'' }}</textarea>
+            {{ form.usernames.errors }}
+        </div>
+
         <div></div>
 
         <input type="submit" value="Add Task">
@@ -81,12 +93,15 @@
 document.addEventListener('DOMContentLoaded', function () {
     const taskTypeSelect = document.getElementById('{{ form.task_type.id_for_label }}');
     const userDiscoveryFields = document.getElementById('user-discovery-fields');
+    const pipelineFields = document.getElementById('pipeline-fields');
     const statsDiv = document.getElementById('task-stats');
 
     function toggleFields() {
-        const isUserDiscovery =
-            taskTypeSelect.value === 'apps.task_queue.tasks.user_discovery_task';
-        userDiscoveryFields.style.display = isUserDiscovery ? 'block' : 'none';
+        const val = taskTypeSelect.value;
+        userDiscoveryFields.style.display =
+            val === 'apps.task_queue.tasks.user_discovery_task' ? 'block' : 'none';
+        pipelineFields.style.display =
+            val === 'apps.task_queue.tasks.multi_pipeline_task' ? 'block' : 'none';
     }
 
     function formatNumber(n) {

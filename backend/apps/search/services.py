@@ -210,38 +210,37 @@ class ElasticsearchService:
             logger.error(f"Scan failed: {exc}")
             return
 
-    def scan_documents_from_timestamp(self, timestamp=None):
+    def scan_documents_from_timestamp(self, timestamp=None, username=None):
         if not self.is_available():
             return
 
-        query = {"match_all": {}}
+        filters = []
 
         if timestamp is not None:
-            query = {
-                "range": {
-                    "timestamp": {
-                        "gt": timestamp,
-                    }
-                }
-            }
+            filters.append({"range": {"timestamp": {"gte": timestamp}}})
+
+        if username is not None:
+            filters.append({"term": {"user": username}})
+
+        if filters:
+            query = {"bool": {"filter": filters}}
+        else:
+            query = {"match_all": {}}
 
         body = {
             "query": query,
-            "sort": [
-                {"timestamp": "asc"},
-            ],
+            "sort": [{"timestamp": "asc"}],
         }
 
         try:
-            count = 0
             for hit in scan(
                 self._client,
                 index=self._index_name,
                 query=body,
                 preserve_order=True,
+                scroll="30m",
             ):
                 yield hit
-                count += 1
         except Exception as exc:
             logger.error(f"Timestamp scan failed: {exc}")
             return
@@ -299,6 +298,25 @@ class ElasticsearchService:
             logger.error(f"Failed to get stats: {exc}")
             return None
 
+    def bulk_index_documents(self, docs):
+        """docs: list of (doc_id, doc_data). Returns count of successfully indexed docs."""
+        if not docs:
+            return 0
+
+        actions = [
+            {"_index": self._index_name, "_id": doc_id, "_source": doc_data}
+            for doc_id, doc_data in docs
+        ]
+
+        try:
+            success, errors = bulk(self._client, actions, raise_on_error=False)
+            if errors:
+                logger.error(f"Bulk index had {len(errors)} error(s): {errors[:3]}")
+            return success
+        except Exception as exc:
+            logger.error(f"Bulk index failed: {exc}")
+            return 0
+
     def delete_index(self):
         if not self.is_available():
             return False
@@ -311,20 +329,22 @@ class ElasticsearchService:
             logger.error(f"Failed to delete index: {exc}")
             return False
 
-    def count_documents_from_timestamp(self, timestamp=None):
+    def count_documents_from_timestamp(self, timestamp=None, username=None):
         if not self.is_available():
             return 0
 
-        query = {"match_all": {}}
+        filters = []
 
         if timestamp is not None:
-            query = {
-                "range": {
-                    "timestamp": {
-                        "gte": timestamp,
-                    }
-                }
-            }
+            filters.append({"range": {"timestamp": {"gte": timestamp}}})
+
+        if username is not None:
+            filters.append({"term": {"user": username}})
+
+        if filters:
+            query = {"bool": {"filter": filters}}
+        else:
+            query = {"match_all": {}}
 
         try:
             response = self._client.count(

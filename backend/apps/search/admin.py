@@ -1,13 +1,13 @@
-from django.contrib import admin
-from django.db.models import Count
-from django.utils.html import format_html
-
-from .models import Match, Regex
 from io import BytesIO
 
-from django.http import HttpResponse
+from django.contrib import admin
+from django.db.models import Count, Q
+from django.http import HttpResponse, JsonResponse
 from django.urls import path
+from django.utils.html import format_html
 from openpyxl import Workbook
+
+from .models import Match, MatchStatus, Regex
 
 
 class MatchInline(admin.TabularInline):
@@ -15,7 +15,6 @@ class MatchInline(admin.TabularInline):
     extra = 0
     fields = [
         "created_at",
-        "match_type",
         "filename",
         "match_preview",
         "source_link",
@@ -66,18 +65,67 @@ class SourceTypeFilter(admin.SimpleListFilter):
         return queryset
 
 
+class DeletedFilter(admin.SimpleListFilter):
+    title = "deleted"
+    parameter_name = "deleted"
+
+    def lookups(self, request, model_admin):
+        return [("yes", "Deleted"), ("no", "Active")]
+
+    def queryset(self, request, queryset):
+        if self.value() == "yes":
+            return queryset.filter(deleted_in_commit__isnull=False) | queryset.filter(deleted_in_gist__isnull=False)
+        if self.value() == "no":
+            return queryset.filter(deleted_in_commit__isnull=True, deleted_in_gist__isnull=True)
+        return queryset
+
+
+class AuthorFilter(admin.SimpleListFilter):
+    title = "author"
+    parameter_name = "author_id"
+
+    def lookups(self, request, model_admin):
+        return []
+
+    def queryset(self, request, queryset):
+        value = self.value()
+        if value:
+            return queryset.filter(
+                Q(commit__author_id=value) | Q(gist__author_id=value)
+            )
+        return queryset
+
+
+class MatchStatusFilter(admin.SimpleListFilter):
+    title = "status"
+    parameter_name = "status"
+
+    def lookups(self, request, model_admin):
+        return MatchStatus.choices
+
+    def queryset(self, request, queryset):
+        if self.value():
+            return queryset.filter(status=self.value())
+        return queryset
+
+
 @admin.register(Match)
 class MatchAdmin(admin.ModelAdmin):
 
     list_display = [
-        "id",
+        "status_actions",
         "regex",
-        "source_type",
-        "match_type",
         "match_preview",
+        "author_link",
+        "repo_link",
+        "source_link",
+        "deleted_link",
     ]
+    list_display_links = ["regex"]
     list_filter = [
-        "match_type",
+        AuthorFilter,
+        DeletedFilter,
+        MatchStatusFilter,
         "regex__category",
         "regex__is_active",
         SourceTypeFilter,
@@ -96,14 +144,21 @@ class MatchAdmin(admin.ModelAdmin):
         "gist__description",
     ]
     autocomplete_fields = ["regex", "commit", "gist"]
-    list_select_related = ["regex", "commit",
-                           "gist", "commit__repo", "gist__author"]
+    list_select_related = [
+        "regex",
+        "commit", "commit__repo", "commit__author",
+        "gist", "gist__author",
+        "deleted_in_commit", "deleted_in_gist",
+    ]
     date_hierarchy = "created_at"
     list_per_page = 100
 
+    class Media:
+        js = ("admin/js/match_status.js",)
+
     fieldsets = [
         ("Pattern", {
-            "fields": ["regex", "match_type"],
+            "fields": ["regex"],
         }),
         ("Source", {
             "fields": ["commit", "gist", "filename"],
@@ -111,11 +166,60 @@ class MatchAdmin(admin.ModelAdmin):
         ("Matched Content", {
             "fields": ["match", "raw_match"],
         }),
+        ("Deletion", {
+            "fields": ["deleted_in_commit", "deleted_in_gist"],
+        }),
         ("Timestamps", {
             "fields": ["created_at"],
             "classes": ["collapse"],
         }),
     ]
+
+    @admin.display(description="Actions")
+    def status_actions(self, obj):
+        if obj.status == MatchStatus.FALSE_POSITIVE:
+            return format_html(
+                """
+                <button type="button"
+                        onclick="markInteresting(this, {0})"
+                        style="border:none;background:#ffc107;color:white;
+                               width:28px;height:28px;border-radius:4px;cursor:pointer;">
+                    ★
+                </button>
+                """,
+                obj.id,
+            )
+        if obj.status == MatchStatus.INTERESTING:
+            return format_html(
+                """
+                <button type="button"
+                        onclick="markFalsePositive(this, {0})"
+                        style="border:none;background:#dc3545;color:white;
+                               width:28px;height:28px;border-radius:4px;cursor:pointer;">
+                    ✕
+                </button>
+                """,
+                obj.id,
+            )
+        return format_html(
+            """
+            <div style="display:flex;gap:6px;">
+                <button type="button"
+                        onclick="markInteresting(this, {0})"
+                        style="border:none;background:#ffc107;color:white;
+                               width:28px;height:28px;border-radius:4px;cursor:pointer;">
+                    ★
+                </button>
+                <button type="button"
+                        onclick="markFalsePositive(this, {0})"
+                        style="border:none;background:#dc3545;color:white;
+                               width:28px;height:28px;border-radius:4px;cursor:pointer;">
+                    ✕
+                </button>
+            </div>
+            """,
+            obj.id,
+        )
 
     def get_urls(self):
         urls = super().get_urls()
@@ -125,8 +229,32 @@ class MatchAdmin(admin.ModelAdmin):
                 self.admin_site.admin_view(self.export_excel),
                 name="matches_export_excel",
             ),
+            path(
+                "mark-match/<int:match_id>/false-positive/",
+                self.admin_site.admin_view(self.mark_false_positive),
+                name="search_match_false_positive",
+            ),
+            path(
+                "mark-match/<int:match_id>/interesting/",
+                self.admin_site.admin_view(self.mark_interesting),
+                name="search_match_interesting",
+            ),
         ]
         return custom_urls + urls
+
+    def _mark_match_status(self, request, match_id, status):
+        try:
+            match = Match.objects.get(pk=match_id)
+        except Match.DoesNotExist:
+            return JsonResponse({"success": False, "error": "Match not found"})
+        count = Match.objects.filter(match=match.match).update(status=status)
+        return JsonResponse({"success": True, "count": count, "match": match.match})
+
+    def mark_false_positive(self, request, match_id):
+        return self._mark_match_status(request, match_id, MatchStatus.FALSE_POSITIVE)
+
+    def mark_interesting(self, request, match_id):
+        return self._mark_match_status(request, match_id, MatchStatus.INTERESTING)
 
     def changelist_view(self, request, extra_context=None):
         extra_context = extra_context or {}
@@ -204,6 +332,66 @@ class MatchAdmin(admin.ModelAdmin):
         )
         response["Content-Disposition"] = 'attachment; filename="matches.xlsx"'
         return response
+
+    @admin.display(description="Author")
+    def author_link(self, obj):
+        if obj.commit_id and obj.commit.author_id:
+            return format_html(
+                '<a href="/admin/git_data/user/{}/change/">{}</a>',
+                obj.commit.author_id,
+                obj.commit.author.username,
+            )
+        if obj.gist_id and obj.gist.author_id:
+            return format_html(
+                '<a href="/admin/git_data/user/{}/change/">{}</a>',
+                obj.gist.author_id,
+                obj.gist.author.username,
+            )
+        return "—"
+
+    @admin.display(description="Repo")
+    def repo_link(self, obj):
+        if obj.commit_id and obj.commit.repo_id:
+            return format_html(
+                '<a href="{}" target="_blank">{}</a>',
+                obj.commit.repo.url or "#",
+                obj.commit.repo.full_name,
+            )
+        if obj.gist_id:
+            return "gist"
+        return "—"
+
+    @admin.display(description="Source")
+    def source_link(self, obj):
+        if obj.commit_id:
+            return format_html(
+                '<a href="{}" target="_blank">{}</a>',
+                obj.commit.url or "#",
+                obj.commit.sha[:7],
+            )
+        if obj.gist_id:
+            return format_html(
+                '<a href="{}" target="_blank">{}</a>',
+                obj.gist.url or "#",
+                obj.gist.gist_id[:8],
+            )
+        return "—"
+
+    @admin.display(description="Deleted in")
+    def deleted_link(self, obj):
+        if obj.deleted_in_commit_id:
+            return format_html(
+                '<a href="{}" target="_blank" style="color:#6c757d">{}</a>',
+                obj.deleted_in_commit.url or "#",
+                obj.deleted_in_commit.sha[:7],
+            )
+        if obj.deleted_in_gist_id:
+            return format_html(
+                '<a href="{}" target="_blank" style="color:#6c757d">{}</a>',
+                obj.deleted_in_gist.url or "#",
+                obj.deleted_in_gist.gist_id[:8],
+            )
+        return "—"
 
     @admin.display(description="Source type")
     def source_type(self, obj):

@@ -258,6 +258,56 @@ class GitHubAPIClient:
         result = self.make_request(f"/repos/{owner}/{repo_name}/commits/{sha}")
         return result if isinstance(result, dict) else {}
 
+    def get_commit_diff(self, owner: str, repo_name: str, sha: str) -> str:
+        """Fetch the raw unified diff for a commit — no 300-file cap."""
+        active_tokens = self.get_active_tokens()
+        if not active_tokens:
+            return ""
+
+        url = f"{self.base_url}/repos/{owner}/{repo_name}/commits/{sha}"
+        tokens_tried = set()
+
+        while len(tokens_tried) < len(active_tokens):
+            token_obj = active_tokens[self.current_token_index % len(active_tokens)]
+            if token_obj.id in tokens_tried:
+                self.current_token_index += 1
+                continue
+
+            headers = {
+                "Authorization": f"token {token_obj.token}",
+                "Accept": "application/vnd.github.v3.diff",
+                "User-Agent": "CodeCollector-SecurityResearch/1.0",
+            }
+
+            for attempt in range(3):
+                try:
+                    response = self.session.get(url, headers=headers, timeout=120)
+                    error_data = self._parse_json(response) if response.headers.get("Content-Type", "").startswith("application/json") else {}
+                    self._raise_if_repo_blocked(response, error_data, url)
+
+                    if response.status_code in (403, 451) and self._is_rate_limited(response, error_data):
+                        tokens_tried.add(token_obj.id)
+                        self.current_token_index += 1
+                        self._log_rate_limited(token_obj, response, len(active_tokens) - len(tokens_tried))
+                        break
+
+                    response.raise_for_status()
+                    return response.text
+
+                except RepositoryAccessBlockedException:
+                    return ""
+                except (requests.exceptions.ChunkedEncodingError, requests.exceptions.ConnectionError) as exc:
+                    if attempt < 2:
+                        logger.warning(f"Network error fetching diff for {owner}/{repo_name}@{sha[:8]} (attempt {attempt + 1}/3): {exc}")
+                        time.sleep(2 ** attempt)
+                    else:
+                        logger.error(f"Failed to fetch raw diff for {owner}/{repo_name}@{sha[:8]} after 3 attempts: {exc}")
+                except Exception as exc:
+                    logger.error(f"Failed to fetch raw diff for {owner}/{repo_name}@{sha[:8]}: {exc}")
+                    break
+
+        return ""
+
     def get_repo_pull_requests(self, owner: str, repo_name: str, state: str = "open", per_page: int = 100, page: int = 1) -> List[Dict]:
         params = {"state": state, "per_page": min(per_page, 100), "page": page}
         result = self.make_request(f"/repos/{owner}/{repo_name}/pulls", params)

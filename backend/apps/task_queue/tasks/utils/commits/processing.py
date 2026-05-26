@@ -39,10 +39,12 @@ def update_user_profile_from_commit(user: User, commit_author_info: Dict, logger
         updated = True
         logger.info(f"Updated {user.username} name: {commit_name}")
 
-    if not user.email and commit_email and "@noreply.github.com" not in commit_email:
-        user.email = commit_email
-        updated = True
-        logger.info(f"Updated {user.username} email: {commit_email}")
+    if commit_email and "noreply.github.com" not in commit_email:
+        existing = user.email.split(";") if user.email else []
+        if commit_email not in existing:
+            user.email = ";".join(existing + [commit_email])
+            updated = True
+            logger.info(f"Updated {user.username} email: {commit_email}")
 
     if updated:
         user.save()

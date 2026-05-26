@@ -1,9 +1,13 @@
 import logging
 import os
 from datetime import timedelta
+from logging.handlers import RotatingFileHandler
 from django.conf import settings
 from django.utils import timezone
 from apps.task_queue.models import TaskJobStatus, TaskJob, TaskWorker, TaskWorkerStatus
+
+
+LOG_MAX_BYTES = 500_000  # ~5000 lines; rotates to .1/.2 at this size, no memory overhead
 
 
 CLAIM_TTL_MINUTES = 30
@@ -28,7 +32,7 @@ def setup_job_logger(job_id: str, task_name: str | None = None) -> tuple[logging
 
     log_file = os.path.join(log_dir, filename)
 
-    file_handler = logging.FileHandler(log_file)
+    file_handler = RotatingFileHandler(log_file, maxBytes=LOG_MAX_BYTES, backupCount=2)
     file_handler.setLevel(logging.INFO)
     file_handler.setFormatter(logging.Formatter(
         '%(asctime)s - %(levelname)s - %(message)s'))
