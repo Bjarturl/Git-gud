@@ -80,6 +80,14 @@ def _build_user_fields(
 ) -> Dict:
     username = full_user_data["login"]
 
+    html_url = full_user_data.get("html_url") or f"https://github.com/{username}"
+    if "github.com/apps/" in html_url:
+        account_type = AccountType.BOT
+    elif full_user_data.get("type") == "Organization":
+        account_type = AccountType.ORGANIZATION
+    else:
+        account_type = AccountType.USER
+
     return {
         "username": username,
         "source_user_id": full_user_data.get("id"),
@@ -88,12 +96,8 @@ def _build_user_fields(
         "location": full_user_data.get("location") or "",
         "company": full_user_data.get("company") or "",
         "bio": full_user_data.get("bio") or "",
-        "url": full_user_data.get("html_url") or f"https://github.com/{username}",
-        "account_type": (
-            AccountType.ORGANIZATION
-            if full_user_data.get("type") == "Organization"
-            else AccountType.USER
-        ),
+        "url": html_url,
+        "account_type": account_type,
         "avatar": full_user_data.get("avatar_url") or "",
         "status": status,
         "source_created_at": parse_date(full_user_data.get("created_at")),

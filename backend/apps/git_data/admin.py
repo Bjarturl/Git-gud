@@ -103,7 +103,8 @@ class HasMatchesFilter(SimpleListFilter):
             return queryset
         has_match = Exists(
             Match.objects.filter(
-                Q(commit__author=OuterRef("pk")) | Q(gist__author=OuterRef("pk"))
+                Q(commit__author=OuterRef("pk")) | Q(
+                    gist__author=OuterRef("pk"))
             )
         )
         if self.value() == "yes":
@@ -158,7 +159,8 @@ class UserAdmin(admin.ModelAdmin):
     list_display = ["status_actions", "username", "name",
                     "company", "location", "bio"]
     list_display_links = ["username"]
-    list_filter = ["account_type", "status", "discovery_method", ScannedFilter, HasMatchesFilter, RelatedToFilter]
+    list_filter = ["account_type", "status", "discovery_method",
+                   ScannedFilter, HasMatchesFilter, RelatedToFilter]
     search_fields = ["username", "name", "email", "company", "bio", "location"]
     inlines = [RepoInline, UserRelationshipFromInline,
                UserRelationshipToInline]
@@ -519,7 +521,8 @@ class UserAdmin(admin.ModelAdmin):
                 obj.account_type,
                 obj.status,
                 obj.discovery_method,
-                obj.created_at.strftime("%Y-%m-%d %H:%M:%S") if obj.created_at else "",
+                obj.created_at.strftime(
+                    "%Y-%m-%d %H:%M:%S") if obj.created_at else "",
             ])
 
         output = BytesIO()
@@ -570,7 +573,8 @@ class UserAdmin(admin.ModelAdmin):
                 output_field=IntegerField(),
             )
             qs = qs.annotate(
-                _match_count=Coalesce(commit_matches, 0) + Coalesce(gist_matches, 0)
+                _match_count=Coalesce(commit_matches, 0) +
+                Coalesce(gist_matches, 0)
             )
         return qs
 
@@ -579,7 +583,7 @@ class UserAdmin(admin.ModelAdmin):
         return obj._match_count
 
     def get_readonly_fields(self, request, obj=None):
-        editable = {"processed_at"}
+        editable = {"processed_at", "account_type"}
         return [
             field.name for field in self.model._meta.fields
             if field.name not in editable
@@ -672,7 +676,8 @@ class RepoAdmin(admin.ModelAdmin):
                 obj.stars or 0,
                 obj.size or 0,
                 obj.default_branch or "",
-                obj.created_at.strftime("%Y-%m-%d %H:%M:%S") if obj.created_at else "",
+                obj.created_at.strftime(
+                    "%Y-%m-%d %H:%M:%S") if obj.created_at else "",
             ])
 
         output = BytesIO()

@@ -102,6 +102,8 @@ services:
     restart: unless-stopped
     environment:
       - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - XPACK_SECURITY_ENABLED=false
+      - XPACK_FLEET_ENABLED=false
     ports:
       - "5601:5601"
     depends_on:
