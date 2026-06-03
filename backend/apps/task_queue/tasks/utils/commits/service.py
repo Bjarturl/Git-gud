@@ -8,6 +8,8 @@ from apps.search.services import ElasticsearchService
 from apps.git_data.models import Commit
 from apps.task_queue.tasks.utils.gists.helpers import is_binary_filename
 from apps.task_queue.tasks.utils.jobs import (
+    COMMIT_CLAIM_LOCK,
+    claim_lock,
     clear_worker_model_claims,
     get_active_claimed_ids,
     get_job_worker,
@@ -24,16 +26,14 @@ CLAIM_REFRESH_EVERY = 100
 
 
 def _claim_next_commit_batch(worker, logger, batch_size: int = CLAIM_BATCH_SIZE) -> List[Commit]:
-    claimed_ids = get_active_claimed_ids("commit", exclude_worker_id=worker.id)
-
-    queryset = Commit._base_manager.order_by().filter(processed_at__isnull=True)
-
-    if claimed_ids:
-        queryset = queryset.exclude(id__in=claimed_ids)
-
-    commit_ids = list(queryset.values_list("id", flat=True)[:batch_size])
-
-    set_worker_model_claims(worker, "commit", commit_ids)
+    commit_ids = []
+    with claim_lock(COMMIT_CLAIM_LOCK):
+        claimed_ids = get_active_claimed_ids("commit", exclude_worker_id=worker.id)
+        queryset = Commit._base_manager.order_by("id").filter(processed_at__isnull=True)
+        if claimed_ids:
+            queryset = queryset.exclude(id__in=claimed_ids)
+        commit_ids = list(queryset.values_list("id", flat=True)[:batch_size])
+        set_worker_model_claims(worker, "commit", commit_ids)
 
     if not commit_ids:
         return []

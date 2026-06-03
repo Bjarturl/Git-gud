@@ -363,7 +363,7 @@ def create_commit_record_with_users(client, repo: Repo, commit_data: Dict, logge
     return commit_record, new_users_count
 
 
-def process_repository_commits(client, repo: Repo, logger, check_cancellation_func) -> Tuple[int, int]:
+def process_repository_commits(client, repo: Repo, logger, check_cancellation_func, refresh_func=None) -> Tuple[int, int]:
     repo_owner = repo.owner.username
     repo_name = repo.name
     default_branch = repo.default_branch
@@ -432,6 +432,8 @@ def process_repository_commits(client, repo: Repo, logger, check_cancellation_fu
         if index % 100 == 0:
             logger.info(
                 f"Progress: {index}/{len(all_commits)} commits processed")
+            if refresh_func:
+                refresh_func()
 
         try:
             commit_record, users_discovered = create_commit_record_with_users(

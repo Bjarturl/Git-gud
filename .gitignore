@@ -130,3 +130,5 @@ media/
 
 *.env
 graph/api/graph.db
+passwords.txt
+graph/api/.vercel/

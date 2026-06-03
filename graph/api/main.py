@@ -1,13 +1,27 @@
+import logging
 import sqlite3
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from fastapi import FastAPI, Query, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, Query, HTTPException, Request
+from fastapi.responses import FileResponse, PlainTextResponse
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+
+logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 from db import get_conn, init_db
 from shortest_path import find_shortest_path
 
 FRONTEND = Path(__file__).parent / "templates" / "index.html"
+
+def real_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+limiter = Limiter(key_func=real_ip, default_limits=["10/second"])
 
 
 @asynccontextmanager
@@ -16,7 +30,48 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Graph API", lifespan=lifespan)
+app = FastAPI(title="ice-git-graph", lifespan=lifespan)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+@app.middleware("http")
+async def log_and_secure(request: Request, call_next):
+    t = time.monotonic()
+    response = await call_next(request)
+    ms = (time.monotonic() - t) * 1000
+    ip = request.headers.get("x-forwarded-for", request.client.host if request.client else "-").split(",")[0].strip()
+    logging.info(f'{ip} {request.method} {request.url.path}{("?" + str(request.query_params)) if request.query_params else ""} {response.status_code} {ms:.0f}ms')
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    return response
+
+
+_SECURITY_TXT = (
+    "Contact: mailto:bbsnskj@gmail.com\n"
+    "Expires: 2027-06-01T00:00:00Z\n"
+    "Canonical: https://ice-git-graph.vercel.app/.well-known/security.txt\n"
+    "Preferred-Languages: en, is\n"
+)
+
+
+@app.get("/.well-known/security.txt", response_class=PlainTextResponse)
+@app.get("/security.txt", response_class=PlainTextResponse)
+def security_txt():
+    return _SECURITY_TXT
+
+
+@app.get("/robots.txt", response_class=PlainTextResponse)
+def robots():
+    return (
+        "User-agent: *\n"
+        "Disallow: /autocomplete\n"
+        "Disallow: /shortest-path\n"
+        "Disallow: /neighbors/\n"
+        "Disallow: /relationships/\n"
+        "Disallow: /user/\n"
+    )
 
 
 @app.get("/", response_class=FileResponse)
@@ -25,7 +80,7 @@ def index():
 
 
 @app.get("/autocomplete")
-def autocomplete(q: str = Query(default="")):
+def autocomplete(request: Request, q: str = Query(default="")):
     q = q.strip()
     with get_conn() as conn:
         if q:
@@ -42,8 +97,9 @@ def autocomplete(q: str = Query(default="")):
 
 @app.get("/shortest-path")
 def shortest_path(
-    source: str = Query(..., description="Username of the starting user"),
-    target: str = Query(..., description="Username of the destination user"),
+    request: Request,
+    source: str = Query(...),
+    target: str = Query(...),
 ):
     source = source.strip()
     target = target.strip()
@@ -76,7 +132,7 @@ def shortest_path(
 
 
 @app.get("/user/{username}")
-def user(username: str):
+def user(request: Request, username: str):
     with get_conn() as conn:
         row = conn.execute(
             "SELECT * FROM nodes WHERE id = ? COLLATE NOCASE", (username,)
@@ -92,7 +148,7 @@ def user(username: str):
 
 
 @app.get("/relationships/{source}/{target}")
-def relationships(source: str, target: str):
+def relationships(request: Request, source: str, target: str):
     with get_conn() as conn:
         rows = conn.execute(
             """SELECT * FROM edges
@@ -103,7 +159,7 @@ def relationships(source: str, target: str):
 
 
 @app.get("/neighbors/{username}")
-def neighbors(username: str):
+def neighbors(request: Request, username: str):
     with get_conn() as conn:
         row = conn.execute(
             "SELECT id FROM nodes WHERE id = ? COLLATE NOCASE", (username,)

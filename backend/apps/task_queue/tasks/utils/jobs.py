@@ -1,14 +1,18 @@
 import logging
 import os
+from contextlib import contextmanager
 from datetime import timedelta
 from logging.handlers import RotatingFileHandler
 from django.conf import settings
+from django.db import connection, transaction
 from django.utils import timezone
 from apps.task_queue.models import TaskJobStatus, TaskJob, TaskWorker, TaskWorkerStatus
 
 
 LOG_MAX_BYTES = 500_000  # ~5000 lines; rotates to .1/.2 at this size, no memory overhead
 
+COMMIT_CLAIM_LOCK = 1
+REPO_CLAIM_LOCK = 2
 
 CLAIM_TTL_MINUTES = 30
 ACTIVE_WORKER_STATUSES = [
@@ -111,6 +115,15 @@ def refresh_worker_claims(
 ):
     worker.claim_expires_at = timezone.now() + timedelta(minutes=ttl_minutes)
     worker.save(update_fields=["claim_expires_at"])
+
+
+@contextmanager
+def claim_lock(lock_key: int):
+    """Serializes concurrent claim attempts via a PostgreSQL advisory transaction lock."""
+    with transaction.atomic():
+        with connection.cursor() as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(%s)", [lock_key])
+        yield
 
 
 def clear_worker_model_claims(worker: TaskWorker, model_name: str):

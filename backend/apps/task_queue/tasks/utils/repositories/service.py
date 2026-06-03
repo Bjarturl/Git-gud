@@ -1,7 +1,11 @@
+import time as _time
+
 from django.utils import timezone
 
 from apps.git_data.models import Repo, UserStatus
 from apps.task_queue.tasks.utils.jobs import (
+    REPO_CLAIM_LOCK,
+    claim_lock,
     clear_worker_model_claims,
     get_active_claimed_ids,
     get_job_worker,
@@ -18,7 +22,6 @@ from ..commits.processing import (
 
 
 CLAIM_BATCH_SIZE = 1000
-CLAIM_REFRESH_EVERY = 100
 
 
 def _get_repository_queryset():
@@ -30,18 +33,16 @@ def _get_repository_queryset():
 
 
 def _claim_next_repository_batch(worker, logger=None, batch_size: int = CLAIM_BATCH_SIZE):
-    claimed_ids = get_active_claimed_ids("repo", exclude_worker_id=worker.id)
-
-    queryset = _get_repository_queryset()
-
-    if claimed_ids:
-        queryset = queryset.exclude(id__in=claimed_ids)
-
-    repo_ids = list(
-        queryset.order_by("id").values_list("id", flat=True)[:batch_size]
-    )
-
-    set_worker_model_claims(worker, "repo", repo_ids)
+    repo_ids = []
+    with claim_lock(REPO_CLAIM_LOCK):
+        claimed_ids = get_active_claimed_ids("repo", exclude_worker_id=worker.id)
+        queryset = _get_repository_queryset()
+        if claimed_ids:
+            queryset = queryset.exclude(id__in=claimed_ids)
+        repo_ids = list(
+            queryset.order_by("id").values_list("id", flat=True)[:batch_size]
+        )
+        set_worker_model_claims(worker, "repo", repo_ids)
 
     if not repo_ids:
         return []
@@ -58,7 +59,7 @@ def _claim_next_repository_batch(worker, logger=None, batch_size: int = CLAIM_BA
     return repositories
 
 
-def _process_repository(client, repo, logger, job_id: str) -> bool:
+def _process_repository(client, repo, logger, job_id: str, refresh_func=None) -> bool:
     start_time = timezone.now()
 
     try:
@@ -67,6 +68,7 @@ def _process_repository(client, repo, logger, job_id: str) -> bool:
             repo,
             logger,
             lambda: is_cancelled(job_id),
+            refresh_func=refresh_func,
         )
         if is_cancelled(job_id):
             return False
@@ -121,8 +123,15 @@ def process_repositories(
         return
 
     repositories_processed = 0
-    processed_since_refresh = 0
     repositories_batch = []
+
+    last_claim_refresh = _time.monotonic()
+
+    def maybe_refresh_claims():
+        nonlocal last_claim_refresh
+        if _time.monotonic() - last_claim_refresh > 600:  # refresh every 10 min
+            refresh_worker_claims(worker)
+            last_claim_refresh = _time.monotonic()
 
     try:
         while True:
@@ -149,7 +158,7 @@ def process_repositories(
             )
             logger.info(f"Owner: {repo.owner.username}")
 
-            completed = _process_repository(client, repo, logger, job_id)
+            completed = _process_repository(client, repo, logger, job_id, maybe_refresh_claims)
             if not completed:
                 if is_cancelled(job_id):
                     break
@@ -160,11 +169,7 @@ def process_repositories(
                 continue
 
             repositories_processed += 1
-            processed_since_refresh += 1
-
-            if processed_since_refresh >= CLAIM_REFRESH_EVERY:
-                refresh_worker_claims(worker)
-                processed_since_refresh = 0
+            maybe_refresh_claims()
 
     finally:
         clear_worker_model_claims(worker, "repo")
