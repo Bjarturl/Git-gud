@@ -120,8 +120,10 @@ class TaskJobAdmin(admin.ModelAdmin):
     search_fields = ["task_path", "worker_id", "error_message", "id"]
     readonly_fields = [
         "log_file_display",
+        "user_profile_link",
         "id",
         "task_path",
+        "name",
         "status",
         "enqueued_at",
         "finished_at",
@@ -138,7 +140,9 @@ class TaskJobAdmin(admin.ModelAdmin):
 
     fields = [
         "log_file_display",
+        "user_profile_link",
         "id",
+        "name",
         "task_path",
         "status",
         "duration_display",
@@ -177,6 +181,8 @@ class TaskJobAdmin(admin.ModelAdmin):
 
     @admin.display(description="Task")
     def task_name_short(self, obj):
+        if obj.name:
+            return format_html("<strong>{}</strong>", obj.name)
         if not obj.task_path:
             return format_html("<strong>{}</strong>", "Unknown")
         name = obj.task_path.split(".")[-1].replace("_task", "")
@@ -462,6 +468,20 @@ class TaskJobAdmin(admin.ModelAdmin):
             mark_safe(live_script),
         )
 
+    @admin.display(description="User profile")
+    def user_profile_link(self, obj):
+        username = (obj.kwargs or {}).get("username")
+        if not username:
+            return "—"
+        user = User.objects.filter(username=username).first()
+        if not user:
+            return username
+        return format_html(
+            '<a href="/admin/git_data/user/{}/change/" style="font-weight:bold">{}</a>',
+            user.pk,
+            username,
+        )
+
     def cancel_job(self, request, job_id):
         try:
             job = TaskJob.objects.get(id=job_id)
@@ -648,15 +668,22 @@ class TaskJobAdmin(admin.ModelAdmin):
                 try:
                     task_path = form.cleaned_data["task_type"]
                     kwargs = {}
+                    name = ""
 
                     if task_path == "apps.task_queue.tasks.user_discovery_task":
                         kwargs["search_query"] = form.cleaned_data["search_query"]
                         if form.cleaned_data.get("set_user_status"):
                             kwargs["set_user_status"] = form.cleaned_data["set_user_status"]
 
+                    elif task_path == "apps.task_queue.tasks.multi_pipeline_task":
+                        usernames = form.cleaned_data["usernames_list"]
+                        kwargs["usernames"] = usernames
+                        name = f"full user scan - {','.join(usernames)}"
+
                     job = enqueue(
                         task_path,
                         priority=0,
+                        name=name,
                         **kwargs,
                     )
 

@@ -6,6 +6,7 @@ from .process_gists import process_gists_task
 from .find_matches import find_matches_task
 from .get_raw_events import get_raw_events_task
 from .sync_event_commits import sync_event_commits_task
+from .pipeline import pipeline_task, multi_pipeline_task
 __all__ = [
     'user_discovery_task',
     'process_users_task',
@@ -14,5 +15,7 @@ __all__ = [
     'process_gists_task',
     'find_matches_task',
     'get_raw_events_task',
-    'sync_event_commits_task'
+    'sync_event_commits_task',
+    'pipeline_task',
+    'multi_pipeline_task',
 ]

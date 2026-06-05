@@ -18,10 +18,12 @@ class TaskQueue:
         priority: int = 0,
         run_after: Optional[timezone.datetime] = None,
         max_retries: int = 3,
+        name: str = "",
         **kwargs
     ) -> TaskJob:
         job = TaskJob.objects.create(
             task_path=task_path,
+            name=name,
             queue_name=queue_name or self.queue_name,
             priority=priority,
             run_after=run_after,

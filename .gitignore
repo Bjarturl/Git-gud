@@ -52,7 +52,7 @@ db.sqlite3
 db.sqlite3-journal
 
 # Task logs
-apps/task_queue/logs/
+**/apps/task_queue/logs/
 
 # Flask
 instance/
@@ -113,6 +113,7 @@ dmypy.json
 *.swp
 *.swo
 *~
+.claude
 
 # OS
 .DS_Store
@@ -128,3 +129,6 @@ staticfiles/
 media/
 
 *.env
+graph/api/graph.db
+passwords.txt
+graph/api/.vercel/

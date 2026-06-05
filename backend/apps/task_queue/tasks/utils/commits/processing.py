@@ -39,10 +39,12 @@ def update_user_profile_from_commit(user: User, commit_author_info: Dict, logger
         updated = True
         logger.info(f"Updated {user.username} name: {commit_name}")
 
-    if not user.email and commit_email and "@noreply.github.com" not in commit_email:
-        user.email = commit_email
-        updated = True
-        logger.info(f"Updated {user.username} email: {commit_email}")
+    if commit_email and "noreply.github.com" not in commit_email:
+        existing = user.email.split(";") if user.email else []
+        if commit_email not in existing:
+            user.email = ";".join(existing + [commit_email])
+            updated = True
+            logger.info(f"Updated {user.username} email: {commit_email}")
 
     if updated:
         user.save()
@@ -361,7 +363,7 @@ def create_commit_record_with_users(client, repo: Repo, commit_data: Dict, logge
     return commit_record, new_users_count
 
 
-def process_repository_commits(client, repo: Repo, logger, check_cancellation_func) -> Tuple[int, int]:
+def process_repository_commits(client, repo: Repo, logger, check_cancellation_func, refresh_func=None) -> Tuple[int, int]:
     repo_owner = repo.owner.username
     repo_name = repo.name
     default_branch = repo.default_branch
@@ -430,6 +432,8 @@ def process_repository_commits(client, repo: Repo, logger, check_cancellation_fu
         if index % 100 == 0:
             logger.info(
                 f"Progress: {index}/{len(all_commits)} commits processed")
+            if refresh_func:
+                refresh_func()
 
         try:
             commit_record, users_discovered = create_commit_record_with_users(

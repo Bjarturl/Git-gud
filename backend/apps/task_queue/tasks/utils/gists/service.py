@@ -21,10 +21,11 @@ from .helpers import is_binary_filename
 
 CLAIM_BATCH_SIZE = 1000
 CLAIM_REFRESH_EVERY = 100
+MAX_CONTENT_BYTES = 8_000_000
 
 
 def _get_gist_queryset():
-    return Gist._base_manager.filter(processed_at__isnull=True)
+    return Gist._base_manager.filter(processed_at__isnull=True, is_fork=False)
 
 
 def _claim_next_gist_batch(worker, logger, batch_size: int = CLAIM_BATCH_SIZE) -> list[Gist]:
@@ -134,6 +135,12 @@ def _index_gist_code(
             if is_binary:
                 additions = ""
                 deletions = ""
+            elif len(previous_content) + len(current_content) > MAX_CONTENT_BYTES:
+                logger.warning(
+                    f"Skipping oversized gist file: {filename!r} "
+                    f"({len(previous_content) + len(current_content)}b > {MAX_CONTENT_BYTES}b)"
+                )
+                continue
             else:
                 additions, deletions = _compute_diff(
                     previous_content, current_content)

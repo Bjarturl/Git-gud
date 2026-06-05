@@ -70,6 +70,7 @@ def _build_gist_defaults(user: User, gist_details: Dict, revision_data: Dict, lo
         "description": gist_details.get("description") or "",
         "url": gist_details.get("html_url") or "",
         "filenames": list((gist_details.get("files") or {}).keys()),
+        "is_fork": gist_details.get("fork_of") is not None,
         "source_created_at": committed_at or created_at,
     }
 
@@ -156,6 +157,10 @@ def process_all_user_gists(client, user, logger, check_cancellation_func) -> int
 
         gist_id = gist_data.get("id")
         if not gist_id:
+            continue
+
+        if gist_data.get("fork_of") is not None:
+            logger.debug(f"Skipping forked gist {gist_id}")
             continue
 
         logger.info(f"Processing gist {index}/{len(all_gists)}: {gist_id}")

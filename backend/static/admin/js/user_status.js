@@ -25,6 +25,50 @@ function hideRowFromElement(element, userId) {
     row.style.display = "none";
 }
 
+function showAdminMessage(html, level) {
+    let list = document.querySelector("ul.messagelist");
+    if (!list) {
+        list = document.createElement("ul");
+        list.className = "messagelist";
+        const content = document.querySelector("#content");
+        if (content) content.prepend(list);
+    }
+    const li = document.createElement("li");
+    li.className = level || "success";
+    li.innerHTML = html;
+    list.appendChild(li);
+}
+
+function runPipeline(element, userId) {
+    fetch(`run-pipeline-ajax/${userId}/`, {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "X-CSRFToken": getCSRFToken(),
+        },
+    })
+        .then((response) => response.json())
+        .then((data) => {
+            if (!data.success) {
+                alert(`Failed to start pipeline: ${data.error || "Unknown error"}`);
+                return;
+            }
+            setTimeout(() => {
+                const a = document.createElement("a");
+                a.href = data.job_url;
+                document.body.appendChild(a);
+                a.dispatchEvent(new MouseEvent("click", { ctrlKey: true, bubbles: true }));
+                document.body.removeChild(a);
+            }, 1000);
+            showAdminMessage(
+                `Pipeline started for "${data.username}" — <a href="${data.job_url}">View job</a>`
+            );
+        })
+        .catch((error) => {
+            alert(`Error starting pipeline: ${error.message}`);
+        });
+}
+
 function handleUserAction(element, userId, action) {
     console.log(`${action} user:`, userId);
 
@@ -59,3 +103,4 @@ function hideUser(element, userId) {
 function confirmUser(element, userId) {
     handleUserAction(element, userId, "confirm");
 }
+

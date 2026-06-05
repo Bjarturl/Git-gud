@@ -18,7 +18,6 @@ class RegexCategory(models.TextChoices):
     NETWORK_INFRASTRUCTURE = "Network infrastructure", "Network infrastructure"
     PASSWORDS_AND_SECRETS_GENERIC = "Passwords and secrets generic", "Passwords and secrets generic"
     PAYMENT_FINANCIAL = "Payment financial", "Payment financial"
-    PII_ICELANDIC = "Pii icelandic", "Pii icelandic"
     PRIVATE_KEYS = "Private keys", "Private keys"
     SOCIAL_MEDIA_APIS = "Social media apis", "Social media apis"
     URLS_GENERAL = "Urls general", "Urls general"
@@ -28,9 +27,10 @@ class RegexCategory(models.TextChoices):
     OTHER = "Other", "Other"
 
 
-class MatchType(models.TextChoices):
-    ADDITION = "Addition", "Addition"
-    DELETION = "Deletion", "Deletion"
+class MatchStatus(models.TextChoices):
+    NONE = "none", "None"
+    FALSE_POSITIVE = "false_positive", "False positive"
+    INTERESTING = "interesting", "Interesting"
 
 
 class Regex(models.Model):
@@ -56,6 +56,9 @@ class Regex(models.Model):
             models.Index(fields=["is_active"]),
             models.Index(fields=["category"]),
             models.Index(fields=["is_active", "last_processed_at"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(fields=["regex_pattern"], name="uniq_regex_pattern"),
         ]
 
     def save(self, *args, **kwargs):
@@ -109,9 +112,36 @@ class Match(models.Model):
         blank=True,
     )
 
-    match_type = models.CharField(
-        max_length=10,
-        choices=MatchType.choices,
+    repo = models.ForeignKey(
+        "git_data.Repo",
+        on_delete=models.SET_NULL,
+        related_name="matches",
+        null=True,
+        blank=True,
+    )
+
+    gist_base_id = models.CharField(max_length=255, null=True, blank=True)
+
+    deleted_in_commit = models.ForeignKey(
+        "git_data.Commit",
+        on_delete=models.SET_NULL,
+        related_name="deleted_matches",
+        null=True,
+        blank=True,
+    )
+
+    deleted_in_gist = models.ForeignKey(
+        "git_data.Gist",
+        on_delete=models.SET_NULL,
+        related_name="deleted_matches",
+        null=True,
+        blank=True,
+    )
+
+    status = models.CharField(
+        max_length=20,
+        choices=MatchStatus.choices,
+        default=MatchStatus.NONE,
     )
 
     match = models.TextField()
@@ -126,7 +156,11 @@ class Match(models.Model):
             models.Index(fields=["regex"]),
             models.Index(fields=["commit"]),
             models.Index(fields=["gist"]),
-            models.Index(fields=["match_type"]),
+            models.Index(fields=["repo"]),
+            models.Index(fields=["gist_base_id"]),
+            models.Index(fields=["status"]),
+            models.Index(fields=["deleted_in_commit"]),
+            models.Index(fields=["deleted_in_gist"]),
         ]
         constraints = [
             models.CheckConstraint(
@@ -138,14 +172,24 @@ class Match(models.Model):
                 name="match_not_both_commit_and_gist",
             ),
             models.UniqueConstraint(
-                fields=["regex", "commit", "match_type", "match", "filename"],
+                fields=["regex", "commit", "match", "filename"],
                 condition=Q(commit__isnull=False),
                 name="uniq_commit_match",
             ),
             models.UniqueConstraint(
-                fields=["regex", "gist", "match_type", "match", "filename"],
+                fields=["regex", "gist", "match", "filename"],
                 condition=Q(gist__isnull=False),
                 name="uniq_gist_match",
+            ),
+            models.UniqueConstraint(
+                fields=["regex", "repo", "match"],
+                condition=Q(repo__isnull=False),
+                name="uniq_repo_match",
+            ),
+            models.UniqueConstraint(
+                fields=["regex", "gist_base_id", "match"],
+                condition=Q(gist_base_id__isnull=False),
+                name="uniq_gist_base_match",
             ),
         ]
 

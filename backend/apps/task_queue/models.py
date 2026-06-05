@@ -64,6 +64,7 @@ class TaskJob(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4)
 
     task_path = models.CharField(max_length=255, db_index=True)
+    name = models.CharField(max_length=255, blank=True, default="")
 
     queue_name = models.CharField(
         max_length=100, default="default", db_index=True)
@@ -112,4 +113,5 @@ class TaskJob(models.Model):
         ordering = ["-priority", "enqueued_at"]
 
     def __str__(self):
-        return f"TaskJob({self.task_path}, {self.status})"
+        label = self.name or self.task_path
+        return f"{label} ({self.status})"
