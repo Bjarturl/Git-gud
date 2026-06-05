@@ -296,6 +296,17 @@ class GitHubAPIClient:
 
                 except RepositoryAccessBlockedException:
                     return ""
+                except requests.exceptions.HTTPError as exc:
+                    status = exc.response.status_code if exc.response is not None else None
+                    if status == 422:
+                        logger.warning(f"Diff too large for {owner}/{repo_name}@{sha[:8]} (422) — falling back")
+                        return ""
+                    elif status in (502, 503, 504) and attempt < 2:
+                        logger.warning(f"Gateway error {status} fetching diff for {owner}/{repo_name}@{sha[:8]} (attempt {attempt + 1}/3), retrying...")
+                        time.sleep(2 ** attempt)
+                    else:
+                        logger.error(f"Failed to fetch raw diff for {owner}/{repo_name}@{sha[:8]}: {exc}")
+                        break
                 except (requests.exceptions.ChunkedEncodingError, requests.exceptions.ConnectionError) as exc:
                     if attempt < 2:
                         logger.warning(f"Network error fetching diff for {owner}/{repo_name}@{sha[:8]} (attempt {attempt + 1}/3): {exc}")
@@ -305,6 +316,13 @@ class GitHubAPIClient:
                 except Exception as exc:
                     logger.error(f"Failed to fetch raw diff for {owner}/{repo_name}@{sha[:8]}: {exc}")
                     break
+            else:
+                # for loop completed all 3 attempts without a break — exhausted
+                break
+
+            # for loop broke — check if it was a rate-limit (tokens_tried updated) or a hard failure
+            if token_obj.id not in tokens_tried:
+                break
 
         return ""
 

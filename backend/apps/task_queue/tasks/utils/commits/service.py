@@ -170,9 +170,8 @@ def _index_commit_code(
                     )
             else:
                 logger.warning(
-                    f"Commit {commit.sha[:8]} needs raw diff but fetch failed — will retry"
+                    f"Commit {commit.sha[:8]} raw diff fetch failed — falling back to commit details ({len(files)} files)"
                 )
-                return None
 
         docs = []
         for file_data in files:
