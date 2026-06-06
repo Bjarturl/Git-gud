@@ -41,7 +41,14 @@ function markMatch(element, matchId, status) {
                 alert(`Failed: ${data.error || "Unknown error"}`);
                 return;
             }
-            hideRowFromElement(element);
+            if (data.ids && data.ids.length > 0) {
+                data.ids.forEach((id) => {
+                    const el = document.querySelector(`[data-match-pk="${id}"]`);
+                    if (el) el.closest("tr").style.display = "none";
+                });
+            } else {
+                hideRowFromElement(element);
+            }
             if (data.count > 1) {
                 const label = status === "false-positive" ? "false positive" : "interesting";
                 showAdminMessage(`Marked ${data.count} matches as ${label}: "${data.match}"`);

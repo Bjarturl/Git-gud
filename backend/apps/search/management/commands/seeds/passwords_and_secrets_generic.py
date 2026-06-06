@@ -63,9 +63,12 @@ SEEDS = [
     {
         "name": "Credential function default argument",
         "regex_pattern": (
-            r"(?i)(?:getenv|environ\.get|env\.fetch|env\.get|getProperty|get_env|get_secret"
+            r"(?i)(?:[a-z0-9_]+_)*(?<![a-zA-Z'\"])['\"]?"
+            + _KW
+            + r"(?:_[a-z0-9_]+)*['\"]?\s*(?:=>|[=:])\s*[^\n\r]{0,40}?"
+            + r"(?:getenv|environ\.get|env\.fetch|env\.get|getProperty|get_env|get_secret"
             r"|config\.get|cfg\.get|settings\.get|getConfig|get_config)"
-            r"\s*\(\s*['\"]" + _KW + r"[\w\-]*['\"],\s*['\"]"
+            + r"\s*\([^,)\n\r]{0,80},\s*['\"]"
             + _EXCL + r"([^'\"\s\n\r]{4,128})['\"]"
         ),
         "category": CAT,

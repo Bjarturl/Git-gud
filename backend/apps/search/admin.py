@@ -1,7 +1,7 @@
 from io import BytesIO
 
 from django.contrib import admin
-from django.db.models import Count, Q
+from django.db.models import Count, IntegerField, OuterRef, Q, Subquery
 from django.http import HttpResponse, JsonResponse
 from django.urls import path
 from django.utils.html import format_html
@@ -116,6 +116,7 @@ class MatchAdmin(admin.ModelAdmin):
         "status_actions",
         "regex",
         "match_preview",
+        "duplicate_count",
         "author_link",
         "repo_link",
         "source_link",
@@ -175,12 +176,25 @@ class MatchAdmin(admin.ModelAdmin):
         }),
     ]
 
+    def get_queryset(self, request):
+        dup_count = Match.objects.filter(
+            match=OuterRef("match")
+        ).values("match").annotate(c=Count("id")).values("c")
+        return super().get_queryset(request).annotate(
+            _duplicate_count=Subquery(dup_count, output_field=IntegerField())
+        )
+
+    @admin.display(description="Dupes", ordering="_duplicate_count")
+    def duplicate_count(self, obj):
+        return obj._duplicate_count
+
     @admin.display(description="Actions")
     def status_actions(self, obj):
         if obj.status == MatchStatus.FALSE_POSITIVE:
             return format_html(
                 """
                 <button type="button"
+                        data-match-pk="{0}"
                         onclick="markInteresting(this, {0})"
                         style="border:none;background:#ffc107;color:white;
                                width:28px;height:28px;border-radius:4px;cursor:pointer;">
@@ -193,6 +207,7 @@ class MatchAdmin(admin.ModelAdmin):
             return format_html(
                 """
                 <button type="button"
+                        data-match-pk="{0}"
                         onclick="markFalsePositive(this, {0})"
                         style="border:none;background:#dc3545;color:white;
                                width:28px;height:28px;border-radius:4px;cursor:pointer;">
@@ -203,7 +218,7 @@ class MatchAdmin(admin.ModelAdmin):
             )
         return format_html(
             """
-            <div style="display:flex;gap:6px;">
+            <div data-match-pk="{0}" style="display:flex;gap:6px;">
                 <button type="button"
                         onclick="markInteresting(this, {0})"
                         style="border:none;background:#ffc107;color:white;
@@ -247,8 +262,10 @@ class MatchAdmin(admin.ModelAdmin):
             match = Match.objects.get(pk=match_id)
         except Match.DoesNotExist:
             return JsonResponse({"success": False, "error": "Match not found"})
-        count = Match.objects.filter(match=match.match).update(status=status)
-        return JsonResponse({"success": True, "count": count, "match": match.match})
+        qs = Match.objects.filter(match=match.match)
+        ids = list(qs.values_list("id", flat=True))
+        qs.update(status=status)
+        return JsonResponse({"success": True, "count": len(ids), "match": match.match, "ids": ids})
 
     def mark_false_positive(self, request, match_id):
         return self._mark_match_status(request, match_id, MatchStatus.FALSE_POSITIVE)
