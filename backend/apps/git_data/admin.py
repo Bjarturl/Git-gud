@@ -583,7 +583,7 @@ class UserAdmin(admin.ModelAdmin):
         return obj._match_count
 
     def get_readonly_fields(self, request, obj=None):
-        editable = {"processed_at", "account_type"}
+        editable = {"processed_at", "account_type", "status"}
         return [
             field.name for field in self.model._meta.fields
             if field.name not in editable
