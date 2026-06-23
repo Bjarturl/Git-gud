@@ -892,6 +892,7 @@ class RepoAdmin(admin.ModelAdmin):
     list_filter = ["processed_at", "is_fork", LanguageFilter]
     search_fields = ["name", "full_name", "owner__username", "description"]
     date_hierarchy = "created_at"
+    actions = ["export_excel"]
 
     fieldsets = [
         ("Basic Information", {
@@ -919,27 +920,9 @@ class RepoAdmin(admin.ModelAdmin):
         }),
     ]
 
-    def get_urls(self):
-        custom_urls = [
-            path(
-                "export-excel/",
-                self.admin_site.admin_view(self.export_excel),
-                name="git_data_repo_export_excel",
-            ),
-        ]
-        return custom_urls + super().get_urls()
-
-    def changelist_view(self, request, extra_context=None):
-        extra_context = extra_context or {}
-        extra_context["export_excel_url"] = "export-excel/"
-        return super().changelist_view(request, extra_context=extra_context)
-
-    def export_excel(self, request):
-        queryset = (
-            self.get_queryset(request)
-            .select_related("owner")
-            .order_by("id")
-        )
+    @admin.action(description="Export selected repos to Excel")
+    def export_excel(self, request, queryset):
+        queryset = queryset.select_related("owner").order_by("id")
 
         wb = Workbook()
         ws = wb.active
