@@ -1,12 +1,13 @@
 from io import BytesIO
 
 from django.contrib import admin
-from django.contrib.admin import SimpleListFilter
+from django.contrib.admin import SimpleListFilter, helpers
 from django.db import connection
 from django.db.models import Count, Exists, IntegerField, OuterRef, Q, Subquery
 from django.db.models.functions import Coalesce
 from django.contrib import messages
 from django.http import HttpResponse, HttpResponseRedirect, JsonResponse
+from django.shortcuts import render
 from django.urls import path
 from django.utils.html import format_html
 from django.utils.safestring import mark_safe
@@ -15,7 +16,7 @@ from openpyxl import Workbook
 from apps.search.models import Match, MatchStatus
 from apps.task_queue.backends import enqueue
 
-from .models import Commit, Gist, Repo, User, UserRelationship, UserStatus
+from .models import Commit, Gist, Repo, Tag, User, UserRelationship, UserStatus
 
 
 class LanguageFilter(SimpleListFilter):
@@ -91,6 +92,19 @@ class ScannedFilter(SimpleListFilter):
         return queryset
 
 
+class TagFilter(SimpleListFilter):
+    title = "tag"
+    parameter_name = "tag"
+
+    def lookups(self, request, model_admin):
+        return Tag.objects.values_list("name", "name")
+
+    def queryset(self, request, queryset):
+        if self.value():
+            return queryset.filter(tags__name=self.value())
+        return queryset
+
+
 class HasMatchesFilter(SimpleListFilter):
     title = "has matches"
     parameter_name = "has_matches"
@@ -154,14 +168,216 @@ class UserRelationshipToInline(admin.TabularInline):
         return [field.name for field in self.model._meta.fields]
 
 
+@admin.register(Tag)
+class TagAdmin(admin.ModelAdmin):
+    list_display = ["name", "user_count", "created_at"]
+    search_fields = ["name"]
+    ordering = ["name"]
+    actions = ["run_pipeline_action"]
+
+    @admin.display(description="Users")
+    def user_count(self, obj):
+        return obj.users.count()
+
+    @admin.action(description="Run pipeline for all confirmed users with selected tags")
+    def run_pipeline_action(self, request, queryset):
+        users = User.objects.filter(tags__in=queryset, status=UserStatus.CONFIRMED).distinct()
+        count = 0
+        for user in users:
+            enqueue(
+                "apps.task_queue.tasks.pipeline_task",
+                priority=0,
+                name=f"full user scan - {user.username}",
+                username=user.username,
+            )
+            count += 1
+        tag_names = ", ".join(queryset.values_list("name", flat=True))
+        self.message_user(request, f"Enqueued pipeline for {count} confirmed user(s) with tag(s): {tag_names}.")
+
+    def get_urls(self):
+        return [
+            path(
+                "import-assets/",
+                self.admin_site.admin_view(self.import_assets_view),
+                name="git_data_tag_import_assets",
+            ),
+            *super().get_urls(),
+        ]
+
+    def changelist_view(self, request, extra_context=None):
+        extra_context = extra_context or {}
+        extra_context["import_assets_url"] = "import-assets/"
+        return super().changelist_view(request, extra_context=extra_context)
+
+    def import_assets_view(self, request):
+        import json
+        import re as re_module
+        from apps.search.models import Regex as RegexModel, RegexCategory
+
+        results = None
+        error = None
+
+        if request.method == "POST":
+            uploaded_files = request.FILES.getlist("asset_file")
+            if not uploaded_files:
+                error = "No file uploaded."
+            else:
+                results = []
+                errors = []
+                for uploaded in uploaded_files:
+                    try:
+                        raw = json.loads(uploaded.read().decode("utf-8-sig"))
+                    except Exception as exc:
+                        errors.append(f"{uploaded.name}: Invalid JSON: {exc}")
+                        continue
+                    try:
+                        file_results = self._process_assets(request, raw, RegexModel, RegexCategory)
+                        results.extend(file_results)
+                    except Exception as exc:
+                        errors.append(f"{uploaded.name}: Processing error: {exc}")
+                if errors:
+                    error = " | ".join(errors)
+                if not results:
+                    results = []
+
+        return render(request, "admin/git_data/import_assets.html", {
+            **self.admin_site.each_context(request),
+            "title": "Import Bug Bounty Assets",
+            "opts": Tag._meta,
+            "results": results,
+            "error": error,
+        })
+
+    @staticmethod
+    def _cidr_to_pattern(cidr: str) -> str | None:
+        """Return a regex pattern that matches IPs in the given CIDR block, or None if unparseable."""
+        import re as re_module
+        import ipaddress
+        try:
+            net = ipaddress.ip_network(cidr, strict=False)
+        except ValueError:
+            return None
+        # Build a pattern from the common prefix octets.
+        octets = str(net.network_address).split(".")
+        prefix_len = net.prefixlen
+        # Number of full octets covered by the prefix.
+        full_octets = prefix_len // 8
+        if full_octets == 0:
+            return None  # too broad to be useful
+        prefix = r"\.".join(re_module.escape(o) for o in octets[:full_octets])
+        return prefix + r"\."
+
+    def _process_assets(self, request, raw, RegexModel, RegexCategory):
+        import re as re_module
+
+        skip_types = {"Android Play Store", "IOS App Store"}
+        by_company = {}
+
+        for asset in raw:
+            if asset.get("Coverage") != "In scope":
+                continue
+            company = asset["Company"]
+            raw_asset = asset["Asset"].strip()
+            asset_type = asset["Type"]
+
+            if asset_type in skip_types:
+                continue
+
+            entry = by_company.setdefault(company, {"wildcards": set(), "urls": set(), "cidrs": {}})
+
+            if asset_type == "Wildcard" and raw_asset.startswith("*."):
+                entry["wildcards"].add(raw_asset[2:])
+            elif asset_type in ("Wildcard", "URL", "Domain"):
+                # Strip path component from URLs like "example.com/path/"
+                host = raw_asset.split("/")[0]
+                entry["urls"].add(host)
+            elif asset_type in ("IP Range", "CIDR", "Other"):
+                if "/" in raw_asset:
+                    # CIDR block — build an IP-prefix regex.
+                    pattern = self._cidr_to_pattern(raw_asset)
+                    if pattern:
+                        entry["cidrs"][raw_asset] = pattern
+                elif re_module.match(r"^\d{1,3}(\.\d{1,3}){3}$", raw_asset):
+                    # Single IP address — exact match regex.
+                    entry["cidrs"][raw_asset] = re_module.escape(raw_asset)
+
+        summary = []
+        ThroughModel = RegexModel.tags.through
+
+        for company, domains in by_company.items():
+            tag, tag_created = Tag.objects.get_or_create(name=company)
+            wildcards = domains.get("wildcards", set())
+            urls = domains.get("urls", set())
+            cidrs = domains.get("cidrs", {})
+
+            filtered_urls = {
+                u for u in urls
+                if not any(u == w or u.endswith("." + w) for w in wildcards)
+            }
+            all_domains = wildcards | filtered_urls
+
+            # pattern → display name: domains + CIDR-derived prefix patterns.
+            pattern_map = {re_module.escape(d): d for d in all_domains}
+            for cidr_str, cidr_pattern in cidrs.items():
+                pattern_map[cidr_pattern] = cidr_str
+
+            # One query: find which patterns already exist.
+            existing_qs = RegexModel.objects.filter(regex_pattern__in=pattern_map)
+            existing_by_pattern = {rx.regex_pattern: rx for rx in existing_qs}
+
+            # Bulk-create the missing ones.
+            to_create = [
+                RegexModel(
+                    regex_pattern=p,
+                    name=name,
+                    category=RegexCategory.URLS_GENERAL,
+                    is_active=True,
+                )
+                for p, name in pattern_map.items()
+                if p not in existing_by_pattern
+            ]
+            RegexModel.objects.bulk_create(to_create, ignore_conflicts=True)
+
+            # Fetch all regex IDs for these patterns (existing + just created).
+            all_rx_ids = list(
+                RegexModel.objects.filter(regex_pattern__in=pattern_map)
+                .values_list("id", flat=True)
+            )
+
+            # Bulk-create M2M links, skipping any that already exist.
+            already_linked = set(
+                ThroughModel.objects.filter(regex_id__in=all_rx_ids, tag=tag)
+                .values_list("regex_id", flat=True)
+            )
+            ThroughModel.objects.bulk_create(
+                [ThroughModel(regex_id=rx_id, tag=tag) for rx_id in all_rx_ids if rx_id not in already_linked],
+                ignore_conflicts=True,
+            )
+
+            summary.append({
+                "company": company,
+                "tag_created": tag_created,
+                "tag": tag,
+                "created": len(to_create),
+                "existing": len(existing_by_pattern),
+                "skipped_urls": len(urls) - len(filtered_urls),
+                "cidr_count": len(cidrs),
+            })
+
+        return summary
+
+
+
 @admin.register(User)
 class UserAdmin(admin.ModelAdmin):
-    list_display = ["status_actions", "username", "name",
-                    "company", "location", "bio"]
+    list_display = ["status_actions", "username", "name", "email",
+                    "company", "location", "bio", "display_tags", "top_repos"]
     list_display_links = ["username"]
     list_filter = ["account_type", "status", "discovery_method",
-                   ScannedFilter, HasMatchesFilter, RelatedToFilter]
+                   TagFilter, ScannedFilter, HasMatchesFilter, RelatedToFilter]
     search_fields = ["username", "name", "email", "company", "bio", "location"]
+    filter_horizontal = ("tags",)
+    actions = ["apply_tag_action", "tag_neighbours_action", "export_excel"]
     inlines = [RepoInline, UserRelationshipFromInline,
                UserRelationshipToInline]
     fieldsets = [
@@ -171,8 +387,11 @@ class UserAdmin(admin.ModelAdmin):
         ("Profile", {
             "fields": ["name", "email", "avatar", "bio", "company", "location", "url"],
         }),
+        ("Tags", {
+            "fields": ["tags", "display_tags"],
+        }),
         ("Source Information", {
-            "fields": ["source_user_id", "tags"],
+            "fields": ["source_user_id"],
         }),
         ("Timestamps", {
             "fields": ["created_at", "processed_at", "scanned_at", "source_created_at"],
@@ -412,14 +631,14 @@ class UserAdmin(admin.ModelAdmin):
                  self.admin_site.admin_view(self.run_pipeline_ajax),
                  name="git_data_user_run_pipeline_ajax"),
             path(
-                "export-excel/",
-                self.admin_site.admin_view(self.export_excel),
-                name="git_data_user_export_excel",
-            ),
-            path(
                 "<int:user_id>/run-pipeline/",
                 self.admin_site.admin_view(self.run_pipeline),
                 name="git_data_user_run_pipeline",
+            ),
+            path(
+                "apply-tag/",
+                self.admin_site.admin_view(self.apply_tag_view),
+                name="git_data_user_apply_tag",
             ),
             *super().get_urls(),
         ]
@@ -483,33 +702,18 @@ class UserAdmin(admin.ModelAdmin):
 
         return HttpResponseRedirect(f"/admin/git_data/user/{user_id}/change/")
 
-    def changelist_view(self, request, extra_context=None):
-        extra_context = extra_context or {}
-        extra_context["export_excel_url"] = "export-excel/"
-        return super().changelist_view(request, extra_context=extra_context)
-
-    def export_excel(self, request):
-        queryset = self.get_queryset(request).order_by("id")
-
+    @admin.action(description="Export selected users to Excel")
+    def export_excel(self, request, queryset):
         wb = Workbook()
         ws = wb.active
         ws.title = "Users"
 
         ws.append([
-            "username",
-            "name",
-            "email",
-            "company",
-            "location",
-            "bio",
-            "url",
-            "account_type",
-            "status",
-            "discovery_method",
-            "created_at",
+            "username", "name", "email", "company", "location",
+            "bio", "url", "account_type", "status", "discovery_method", "created_at",
         ])
 
-        for obj in queryset.iterator():
+        for obj in queryset.order_by("id").iterator():
             ws.append([
                 obj.username,
                 obj.name or "",
@@ -521,8 +725,7 @@ class UserAdmin(admin.ModelAdmin):
                 obj.account_type,
                 obj.status,
                 obj.discovery_method,
-                obj.created_at.strftime(
-                    "%Y-%m-%d %H:%M:%S") if obj.created_at else "",
+                obj.created_at.strftime("%Y-%m-%d %H:%M:%S") if obj.created_at else "",
             ])
 
         output = BytesIO()
@@ -555,6 +758,17 @@ class UserAdmin(admin.ModelAdmin):
             fields.append("match_count")
         return fields
 
+    def get_search_results(self, request, queryset, search_term):
+        qs, use_distinct = super().get_search_results(request, queryset, search_term)
+        if search_term:
+            repo_qs = queryset.filter(
+                Q(repos__name__icontains=search_term) | Q(repos__description__icontains=search_term),
+                repos__is_fork=False,
+            )
+            qs = (qs | repo_qs).distinct()
+            use_distinct = True
+        return qs, use_distinct
+
     def get_queryset(self, request):
         qs = super().get_queryset(request)
         if request.GET.get("has_matches") == "yes":
@@ -582,12 +796,93 @@ class UserAdmin(admin.ModelAdmin):
     def match_count(self, obj):
         return obj._match_count
 
+    @admin.display(description="Top Repos")
+    def top_repos(self, obj):
+        names = list(
+            Repo.objects.filter(owner=obj, is_fork=False)
+            .values_list("name", flat=True)[:5]
+        )
+        return ", ".join(names) if names else "—"
+
+    @admin.display(description="Tags")
+    def display_tags(self, obj):
+        names = [t.name for t in obj.tags.all()]
+        return ", ".join(names) if names else "—"
+
+    @admin.action(description="Add tag to selected users")
+    def apply_tag_action(self, request, queryset):
+        selected = request.POST.getlist(helpers.ACTION_CHECKBOX_NAME)
+        return HttpResponseRedirect(
+            f"/admin/git_data/user/apply-tag/"
+            f"?ids={','.join(selected)}&mode=selected"
+        )
+
+    @admin.action(description="Add tag to neighbours of selected users")
+    def tag_neighbours_action(self, request, queryset):
+        selected_ids = list(queryset.values_list("id", flat=True))
+        neighbour_ids = set(
+            UserRelationship.objects.filter(
+                Q(from_user_id__in=selected_ids) | Q(to_user_id__in=selected_ids)
+            ).values_list("from_user_id", flat=True)
+        ) | set(
+            UserRelationship.objects.filter(
+                Q(from_user_id__in=selected_ids) | Q(to_user_id__in=selected_ids)
+            ).values_list("to_user_id", flat=True)
+        )
+        neighbour_ids -= set(selected_ids)
+        return HttpResponseRedirect(
+            f"/admin/git_data/user/apply-tag/"
+            f"?ids={','.join(str(i) for i in neighbour_ids)}&mode=neighbours"
+        )
+
+    def apply_tag_view(self, request):
+        ids_param = request.GET.get("ids", "") or request.POST.get("ids", "")
+        mode = request.GET.get("mode", "selected") or request.POST.get("mode", "selected")
+        try:
+            user_ids = [int(i) for i in ids_param.split(",") if i.strip()]
+        except ValueError:
+            user_ids = []
+        queryset = User.objects.filter(pk__in=user_ids)
+
+        if request.method == "POST" and "apply" in request.POST:
+            tag_name = request.POST.get("new_tag", "").strip()
+            tag_id = request.POST.get("tag_id", "").strip()
+            if tag_name:
+                tag, _ = Tag.objects.get_or_create(name=tag_name)
+            elif tag_id:
+                try:
+                    tag = Tag.objects.get(pk=tag_id)
+                except Tag.DoesNotExist:
+                    messages.error(request, "Tag not found.")
+                    tag = None
+            else:
+                tag = None
+
+            if tag:
+                for user in queryset:
+                    user.tags.add(tag)
+                messages.success(
+                    request,
+                    f"Added tag '{tag.name}' to {queryset.count()} user(s).",
+                )
+            return HttpResponseRedirect("/admin/git_data/user/")
+
+        return render(request, "admin/git_data/apply_tag_action.html", {
+            **self.admin_site.each_context(request),
+            "title": "Apply Tag",
+            "queryset": queryset,
+            "user_ids": ids_param,
+            "mode": mode,
+            "existing_tags": Tag.objects.all(),
+            "opts": self.model._meta,
+        })
+
     def get_readonly_fields(self, request, obj=None):
         editable = {"processed_at", "account_type", "status"}
         return [
             field.name for field in self.model._meta.fields
             if field.name not in editable
-        ] + ["matches_table", "match_admin_link"]
+        ] + ["matches_table", "match_admin_link", "display_tags"]
 
 
 @admin.register(Repo)
@@ -597,6 +892,7 @@ class RepoAdmin(admin.ModelAdmin):
     list_filter = ["processed_at", "is_fork", LanguageFilter]
     search_fields = ["name", "full_name", "owner__username", "description"]
     date_hierarchy = "created_at"
+    actions = ["export_excel"]
 
     fieldsets = [
         ("Basic Information", {
@@ -624,27 +920,9 @@ class RepoAdmin(admin.ModelAdmin):
         }),
     ]
 
-    def get_urls(self):
-        custom_urls = [
-            path(
-                "export-excel/",
-                self.admin_site.admin_view(self.export_excel),
-                name="git_data_repo_export_excel",
-            ),
-        ]
-        return custom_urls + super().get_urls()
-
-    def changelist_view(self, request, extra_context=None):
-        extra_context = extra_context or {}
-        extra_context["export_excel_url"] = "export-excel/"
-        return super().changelist_view(request, extra_context=extra_context)
-
-    def export_excel(self, request):
-        queryset = (
-            self.get_queryset(request)
-            .select_related("owner")
-            .order_by("id")
-        )
+    @admin.action(description="Export selected repos to Excel")
+    def export_excel(self, request, queryset):
+        queryset = queryset.select_related("owner").order_by("id")
 
         wb = Workbook()
         ws = wb.active

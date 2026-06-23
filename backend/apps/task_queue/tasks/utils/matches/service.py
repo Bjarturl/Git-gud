@@ -19,6 +19,7 @@ CHECKPOINT_FLUSH_EVERY = 100
 MAX_ADDITIONS_BYTES = 500_000
 MAX_LINE_LENGTH = 2_000
 REGEX_TIMEOUT_SECS = 3.0
+THROTTLE_SLEEP_SECS = 0.05
 
 _IGNORED_PATH_SEGMENTS = frozenset([
     "node_modules",
@@ -43,6 +44,7 @@ def _get_active_regexes():
     return list(
         Regex.objects
         .filter(is_active=True)
+        .prefetch_related('tags')
         .only("id", "name", "regex_pattern", "last_processed_at")
         .order_by("id")
     )
@@ -268,6 +270,8 @@ def _create_matches_for_document(compiled_regexes, commit, gist, filename, addit
 
 
 def _scan_global(es_service, compiled_regexes, logger, job_id):
+    # Tag-specific regexes only run in user scans, never in the global sweep.
+    compiled_regexes = [(rx, p) for rx, p in compiled_regexes if not rx.tags.all()]
     regexes = [r for r, _ in compiled_regexes]
     min_cp = _min_checkpoint(regexes)
 
@@ -347,6 +351,7 @@ def _scan_global(es_service, compiled_regexes, logger, job_id):
             if scanned % CHECKPOINT_FLUSH_EVERY == 0:
                 _flush_checkpoints(latest_ts)
                 reset_queries()
+                time.sleep(THROTTLE_SLEEP_SECS)
                 logger.info(
                     f"Global scan progress: scanned={scanned}/{eligible_total}, "
                     f"matches_created={created}, skipped={skipped}"
@@ -362,6 +367,21 @@ def _scan_global(es_service, compiled_regexes, logger, job_id):
 
 
 def _scan_for_user(es_service, compiled_regexes, username, logger, job_id):
+    from apps.git_data.models import User as GitUser
+    try:
+        user_tag_ids = set(
+            GitUser.objects.get(username=username).tags.values_list("id", flat=True)
+        )
+    except GitUser.DoesNotExist:
+        user_tag_ids = set()
+
+    # Keep global regexes (no tags) + tag-specific ones where the user has a matching tag.
+    def _rx_applies(rx):
+        rx_tag_ids = {t.id for t in rx.tags.all()}  # uses prefetch cache
+        return not rx_tag_ids or rx_tag_ids & user_tag_ids
+
+    compiled_regexes = [(rx, p) for rx, p in compiled_regexes if _rx_applies(rx)]
+
     eligible_total = es_service.count_documents_from_timestamp(username=username)
     logger.info(
         f"User scan: user={username}, regexes={len(compiled_regexes)}, eligible={eligible_total}"
@@ -414,6 +434,7 @@ def _scan_for_user(es_service, compiled_regexes, username, logger, job_id):
 
         if scanned % PROGRESS_LOG_EVERY == 0:
             reset_queries()
+            time.sleep(THROTTLE_SLEEP_SECS)
             logger.info(
                 f"User scan progress: scanned={scanned}/{eligible_total}, "
                 f"matches_created={created}, skipped={skipped}"

@@ -1,13 +1,24 @@
+import re
 from io import BytesIO
 
 from django.contrib import admin
+from django.contrib.admin import SimpleListFilter
 from django.db.models import Count, IntegerField, OuterRef, Q, Subquery
 from django.http import HttpResponse, JsonResponse
 from django.urls import path
 from django.utils.html import format_html
 from openpyxl import Workbook
 
+from apps.git_data.models import Tag
 from .models import Match, MatchStatus, Regex
+
+_ILLEGAL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _safe(value):
+    if not value:
+        return ""
+    return _ILLEGAL_CHARS_RE.sub("", str(value))
 
 
 class MatchInline(admin.TabularInline):
@@ -82,18 +93,50 @@ class DeletedFilter(admin.SimpleListFilter):
 
 class AuthorFilter(admin.SimpleListFilter):
     title = "author"
-    parameter_name = "author_id"
+    parameter_name = "author"
+    template = "admin/search/match/username_filter.html"
 
     def lookups(self, request, model_admin):
-        return []
+        return [("_", "_")]
+
+    def choices(self, changelist):
+        yield {
+            "selected": bool(self.value()),
+            "query_string": changelist.get_query_string(remove=[self.parameter_name]),
+            "display": "All",
+        }
 
     def queryset(self, request, queryset):
-        value = self.value()
-        if value:
-            return queryset.filter(
-                Q(commit__author_id=value) | Q(gist__author_id=value)
-            )
-        return queryset
+        val = self.value()
+        if not val:
+            return queryset
+        return queryset.filter(
+            Q(commit__author__username__iexact=val) | Q(gist__author__username__iexact=val)
+        )
+
+
+class RepoOwnerFilter(admin.SimpleListFilter):
+    title = "repo owner"
+    parameter_name = "repo_owner"
+    template = "admin/search/match/username_filter.html"
+
+    def lookups(self, request, model_admin):
+        return [("_", "_")]
+
+    def choices(self, changelist):
+        yield {
+            "selected": bool(self.value()),
+            "query_string": changelist.get_query_string(remove=[self.parameter_name]),
+            "display": "All",
+        }
+
+    def queryset(self, request, queryset):
+        val = self.value()
+        if not val:
+            return queryset
+        return queryset.filter(
+            Q(commit__repo__owner__username__iexact=val) | Q(repo__owner__username__iexact=val)
+        )
 
 
 class MatchStatusFilter(admin.SimpleListFilter):
@@ -107,6 +150,22 @@ class MatchStatusFilter(admin.SimpleListFilter):
         if self.value():
             return queryset.filter(status=self.value())
         return queryset
+
+
+class AuthorTagFilter(SimpleListFilter):
+    title = "author tag"
+    parameter_name = "author_tag"
+
+    def lookups(self, request, model_admin):
+        return Tag.objects.values_list("name", "name")
+
+    def queryset(self, request, queryset):
+        if not self.value():
+            return queryset
+        return queryset.filter(
+            Q(commit__author__tags__name=self.value()) |
+            Q(gist__author__tags__name=self.value())
+        ).distinct()
 
 
 @admin.register(Match)
@@ -125,6 +184,8 @@ class MatchAdmin(admin.ModelAdmin):
     list_display_links = ["regex"]
     list_filter = [
         AuthorFilter,
+        RepoOwnerFilter,
+        AuthorTagFilter,
         DeletedFilter,
         MatchStatusFilter,
         "regex__category",
@@ -177,12 +238,14 @@ class MatchAdmin(admin.ModelAdmin):
     ]
 
     def get_queryset(self, request):
-        dup_count = Match.objects.filter(
-            match=OuterRef("match")
-        ).values("match").annotate(c=Count("id")).values("c")
-        return super().get_queryset(request).annotate(
-            _duplicate_count=Subquery(dup_count, output_field=IntegerField())
-        )
+        qs = super().get_queryset(request)
+        url_name = getattr(request.resolver_match, "url_name", "")
+        if url_name.endswith("_changelist"):
+            dup_count = Match.objects.filter(
+                match=OuterRef("match")
+            ).values("match").annotate(c=Count("id")).values("c")
+            qs = qs.annotate(_duplicate_count=Subquery(dup_count, output_field=IntegerField()))
+        return qs
 
     @admin.display(description="Dupes", ordering="_duplicate_count")
     def duplicate_count(self, obj):
@@ -278,20 +341,30 @@ class MatchAdmin(admin.ModelAdmin):
         extra_context["export_excel_url"] = "export-excel/"
         return super().changelist_view(request, extra_context=extra_context)
 
+    def _apply_export_filters(self, request, queryset):
+        for filter_class in [AuthorFilter, RepoOwnerFilter, DeletedFilter, MatchStatusFilter, SourceTypeFilter]:
+            f = filter_class(request, request.GET.copy(), Match, self)
+            queryset = f.queryset(request, queryset)
+        category = request.GET.get("regex__category")
+        if category:
+            queryset = queryset.filter(regex__category=category)
+        is_active = request.GET.get("regex__is_active")
+        if is_active in ("1", "0"):
+            queryset = queryset.filter(regex__is_active=is_active == "1")
+        return queryset
+
     def export_excel(self, request):
-        queryset = (
-            self.get_queryset(request)
-            .select_related(
-                "regex",
-                "commit",
-                "commit__repo",
-                "commit__repo__owner",
-                "commit__author",
-                "gist",
-                "gist__author",
-            )
-            .order_by("id")
-        )
+        queryset = Match.objects.exclude(status=MatchStatus.FALSE_POSITIVE)
+        queryset = self._apply_export_filters(request, queryset)
+        queryset = queryset.select_related(
+            "regex",
+            "commit",
+            "commit__repo",
+            "commit__repo__owner",
+            "commit__author",
+            "gist",
+            "gist__author",
+        ).order_by("id")
 
         wb = Workbook()
         ws = wb.active
@@ -329,14 +402,14 @@ class MatchAdmin(admin.ModelAdmin):
                 commit_message = ""
 
             ws.append([
-                str(obj.regex.category) if obj.regex_id else "",
-                obj.raw_match or "",
-                obj.match or "",
-                html_url,
-                user,
-                user_company,
-                repo,
-                commit_message,
+                _safe(obj.regex.category) if obj.regex_id else "",
+                _safe(obj.raw_match),
+                _safe(obj.match),
+                _safe(html_url),
+                _safe(user),
+                _safe(user_company),
+                _safe(repo),
+                _safe(commit_message),
             ])
 
         output = BytesIO()
@@ -466,9 +539,14 @@ class RegexAdmin(admin.ModelAdmin):
     ordering = ["category", "name"]
     inlines = [MatchInline]
 
+    filter_horizontal = ("tags",)
     fieldsets = [
         ("Pattern", {
             "fields": ["name", "regex_pattern", "category", "is_active"],
+        }),
+        ("Tag Scope", {
+            "fields": ["tags"],
+            "description": "Leave empty to run on all users. Select tags to restrict this regex to users with those tags only.",
         }),
         ("Timestamps", {
             "fields": ["created_at", "updated_at"],

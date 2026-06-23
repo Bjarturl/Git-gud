@@ -1,0 +1,28 @@
+{% load i18n %}
+<h3>{% blocktranslate with filter_title=title %}By {{ filter_title }}{% endblocktranslate %}</h3>
+<ul>
+  <form method="get">
+    {% for k, v in request.GET.items %}
+      {% if k != spec.parameter_name %}
+        <input type="hidden" name="{{ k }}" value="{{ v }}">
+      {% endif %}
+    {% endfor %}
+    <li>
+      <input
+        type="text"
+        name="{{ spec.parameter_name }}"
+        value="{{ spec.value|default:'' }}"
+        placeholder="Username"
+        style="width:100%; box-sizing:border-box; padding:4px 6px; margin-bottom:4px;"
+      >
+    </li>
+    <li>
+      <input type="submit" value="{% translate 'Filter' %}" style="width:100%;">
+    </li>
+    {% if spec.value %}
+    <li style="margin-top:4px;">
+      <a href="?{% for k, v in request.GET.items %}{% if k != spec.parameter_name %}{{ k }}={{ v }}&{% endif %}{% endfor %}">{% translate "Clear" %}</a>
+    </li>
+    {% endif %}
+  </form>
+</ul>

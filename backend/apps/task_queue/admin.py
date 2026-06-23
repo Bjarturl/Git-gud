@@ -4,7 +4,7 @@ from datetime import datetime, timezone as dt_timezone
 
 from django.conf import settings
 from django.contrib import admin, messages
-from django.db.models import Exists, OuterRef
+from django.db.models import Count, Exists, OuterRef, Q
 from django.http import HttpResponseRedirect, JsonResponse
 from django.template.response import TemplateResponse
 from django.urls import path
@@ -554,8 +554,12 @@ class TaskJobAdmin(admin.ModelAdmin):
         qs = model.objects.all()
         if extra_filters:
             qs = qs.filter(**extra_filters)
-        total = qs.count()
-        processed = qs.filter(processed_at__isnull=False).count()
+        result = qs.aggregate(
+            total=Count("id"),
+            processed=Count("id", filter=Q(processed_at__isnull=False)),
+        )
+        total = result["total"]
+        processed = result["processed"]
         remaining = total - processed
         pct = round((processed / total) * 100, 1) if total else 0
         return {
@@ -586,7 +590,7 @@ class TaskJobAdmin(admin.ModelAdmin):
             stats["label"] = "repositories (confirmed owners, non-fork)"
 
         elif "process_gists_task" in task_type:
-            stats = self._processed_at_stats(Gist)
+            stats = self._processed_at_stats(Gist, {"is_fork": False})
             stats["label"] = "gists"
 
         elif "process_commits_task" in task_type:

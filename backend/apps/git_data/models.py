@@ -32,6 +32,18 @@ class UserStatus(models.TextChoices):
     HIDDEN = 'Hidden', 'Hidden'
 
 
+class Tag(models.Model):
+    name = models.CharField(max_length=100, unique=True)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = 'git_tag'
+        ordering = ['name']
+
+    def __str__(self):
+        return self.name
+
+
 class User(models.Model):
     username = models.CharField(max_length=255, unique=True)
     account_type = models.CharField(
@@ -64,8 +76,7 @@ class User(models.Model):
     source_created_at = models.DateTimeField(null=True, blank=True)
 
     source_user_id = models.BigIntegerField()
-    tags = ArrayField(models.CharField(max_length=100),
-                      default=list, blank=True)
+    tags = models.ManyToManyField('Tag', blank=True, related_name='users')
 
     class Meta:
         db_table = 'git_user'
@@ -73,6 +84,7 @@ class User(models.Model):
             models.Index(fields=['username']),
             models.Index(fields=['status']),
             models.Index(fields=['account_type']),
+            models.Index(fields=['processed_at']),
         ]
 
     def __str__(self):
@@ -115,6 +127,7 @@ class Repo(models.Model):
             models.Index(fields=['source_repo_id']),
             models.Index(fields=['owner']),
             models.Index(fields=['stars']),
+            models.Index(fields=['processed_at']),
         ]
 
     def __str__(self):
@@ -165,6 +178,7 @@ class Commit(models.Model):
             models.Index(fields=['repo', 'author']),
             models.Index(fields=['commit_date']),
             models.Index(fields=['branch_name']),
+            models.Index(fields=['processed_at']),
         ]
         unique_together = [['sha', 'repo']]
 
@@ -198,6 +212,7 @@ class Gist(models.Model):
             models.Index(fields=['author']),
             models.Index(fields=['source_created_at']),
             models.Index(fields=['gist_id', 'revision_id']),
+            models.Index(fields=['processed_at']),
         ]
 
         unique_together = [['gist_id', 'revision_id']]
