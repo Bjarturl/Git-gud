@@ -1,0 +1,49 @@
+{% extends "admin/base_site.html" %}
+{% block content %}
+<h1>{{ title }}</h1>
+
+{% if mode == "neighbours" %}
+  <p>Applying tag to <strong>{{ queryset.count }}</strong> neighbour user(s).</p>
+{% else %}
+  <p>Applying tag to <strong>{{ queryset.count }}</strong> selected user(s).</p>
+{% endif %}
+
+<ul style="max-height:200px;overflow-y:auto;border:1px solid #ddd;padding:8px 8px 8px 24px;margin-bottom:16px;border-radius:4px">
+  {% for user in queryset %}
+    <li><a href="/admin/git_data/user/{{ user.pk }}/change/" target="_blank">{{ user.username }}</a></li>
+  {% empty %}
+    <li>No users selected.</li>
+  {% endfor %}
+</ul>
+
+<form method="post" action="/admin/git_data/user/apply-tag/">
+  {% csrf_token %}
+  <input type="hidden" name="ids" value="{{ user_ids }}">
+  <input type="hidden" name="mode" value="{{ mode }}">
+
+  <fieldset style="padding:16px;border:1px solid #ddd;border-radius:4px;margin-bottom:16px">
+    <legend style="font-weight:bold;padding:0 8px">Choose existing tag</legend>
+    <select name="tag_id" style="width:300px;padding:6px;margin-top:8px">
+      <option value="">— select —</option>
+      {% for tag in existing_tags %}
+        <option value="{{ tag.pk }}">{{ tag.name }}</option>
+      {% endfor %}
+    </select>
+  </fieldset>
+
+  <fieldset style="padding:16px;border:1px solid #ddd;border-radius:4px;margin-bottom:24px">
+    <legend style="font-weight:bold;padding:0 8px">Or create new tag</legend>
+    <input type="text" name="new_tag" placeholder="new tag name"
+           style="width:300px;padding:6px;margin-top:8px;border:1px solid #ccc;border-radius:4px">
+    <p style="font-size:12px;color:#666;margin:4px 0 0">If filled in, this takes priority over the dropdown.</p>
+  </fieldset>
+
+  <button type="submit" name="apply" value="1"
+          style="background:#0d6efd;color:white;border:none;padding:10px 20px;border-radius:4px;cursor:pointer;font-size:14px">
+    Apply Tag
+  </button>
+  <a href="/admin/git_data/user/"
+     style="margin-left:12px;color:#6c757d;text-decoration:none">Cancel</a>
+
+</form>
+{% endblock %}

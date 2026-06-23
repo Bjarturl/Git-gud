@@ -3,7 +3,7 @@
 
 {% block object-tools-items %}
     <li>
-        <a href="{% url 'admin:matches_export_excel' %}" style="background-color: #28a745; border-color: #28a745;">
+        <a href="{% url 'admin:matches_export_excel' %}?{{ request.GET.urlencode }}" style="background-color: #28a745; border-color: #28a745;">
             Export to Excel
         </a>
     </li>

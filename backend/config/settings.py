@@ -173,7 +173,7 @@ TASK_QUEUE_SETTINGS = {
 ELASTICSEARCH_DSL = {
     'default': {
         'hosts': [f"http://{config('ELASTICSEARCH_HOST', default='localhost')}:{config('ELASTICSEARCH_PORT', default=9200)}"],
-        'timeout': 20,
+        'timeout': 120,
         'max_retries': 10,
         'retry_on_timeout': True,
     }

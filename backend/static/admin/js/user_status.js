@@ -72,6 +72,9 @@ function runPipeline(element, userId) {
 function handleUserAction(element, userId, action) {
     console.log(`${action} user:`, userId);
 
+    const row = element.closest("tr");
+    if (row) row.style.display = "none";
+
     fetch(`${action}-user/${userId}/`, {
         method: "POST",
         headers: {
@@ -84,14 +87,13 @@ function handleUserAction(element, userId, action) {
             console.log(`${action} response:`, data);
 
             if (!data.success) {
+                if (row) row.style.display = "";
                 alert(`Failed to ${action} user: ${data.error || "Unknown error"}`);
-                return;
             }
-
-            hideRowFromElement(element, userId);
         })
         .catch((error) => {
             console.error(`${action} error:`, error);
+            if (row) row.style.display = "";
             alert(`Error ${action}ing user: ${error.message}`);
         });
 }

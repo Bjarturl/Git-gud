@@ -132,3 +132,4 @@ media/
 graph/api/graph.db
 passwords.txt
 graph/api/.vercel/
+backups

@@ -21,8 +21,8 @@ from apps.task_queue.tasks.utils.jobs import (
 from clients.github import GitHubAPIClient
 
 
-CLAIM_BATCH_SIZE = 1000
-CLAIM_REFRESH_EVERY = 100
+CLAIM_BATCH_SIZE = 100
+CLAIM_REFRESH_EVERY = 25
 
 
 def _claim_next_commit_batch(worker, logger, batch_size: int = CLAIM_BATCH_SIZE) -> List[Commit]:

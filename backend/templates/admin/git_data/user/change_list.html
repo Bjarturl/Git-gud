@@ -1,14 +1,4 @@
 {% extends "admin/change_list.html" %}
-{% load static %}
-
-{% block object-tools-items %}
-    <li>
-        <a href="{% url 'admin:git_data_user_export_excel' %}" style="background-color: #28a745; border-color: #28a745;">
-            Export to Excel
-        </a>
-    </li>
-    {{ block.super }}
-{% endblock %}
 
 {% block extrahead %}
 {{ block.super }}
@@ -52,8 +42,4 @@
     transition: opacity 0.5s;
 }
 </style>
-{% endblock %}
-
-{% block extrajs %}
-{{ block.super }}
 {% endblock %}

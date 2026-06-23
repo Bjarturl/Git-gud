@@ -45,6 +45,8 @@ class Regex(models.Model):
     )
 
     last_processed_at = models.DateTimeField(null=True, blank=True)
+    # Empty = runs on all users. Populated = only runs on users with these tags.
+    tags = models.ManyToManyField('git_data.Tag', blank=True, related_name='regexes')
 
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)

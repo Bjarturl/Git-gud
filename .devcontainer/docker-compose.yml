@@ -56,12 +56,6 @@ services:
   worker-2:
     <<: *worker_base
 
-  worker-3:
-    <<: *worker_base
-
-  worker-4:
-    <<: *worker_base
-
   postgres:
     image: postgres:16
     restart: unless-stopped
@@ -86,7 +80,11 @@ services:
     environment:
       - discovery.type=single-node
       - xpack.security.enabled=false
-      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+      - ES_JAVA_OPTS=-Xms2g -Xmx2g
+      - indices.breaker.total.limit=80%
+      - indices.breaker.fielddata.limit=40%
+      - indices.breaker.request.limit=40%
+      - thread_pool.search.queue_size=500
     ports:
       - "9200:9200"
     volumes:
@@ -100,6 +98,8 @@ services:
   kibana:
     image: docker.elastic.co/kibana/kibana:8.16.1
     restart: unless-stopped
+    profiles:
+      - kibana
     environment:
       - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
       - XPACK_SECURITY_ENABLED=false

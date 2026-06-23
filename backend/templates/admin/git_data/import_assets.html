@@ -1,0 +1,66 @@
+{% extends "admin/base_site.html" %}
+{% block content %}
+
+<p>Upload one or more Defend Iceland asset JSON files. In-scope Wildcard, URL, and CIDR/IP Range assets are imported as
+regexes scoped to a tag per company. App Store assets are skipped. URL entries already covered by a wildcard for the same base domain are
+also skipped.</p>
+
+{% if error %}
+  <p style="color:#dc3545;font-weight:bold">{{ error }}</p>
+{% endif %}
+
+{% if results is None %}
+<form method="post" enctype="multipart/form-data"
+      style="margin-top:16px;padding:20px;border:1px solid #ddd;border-radius:4px;max-width:480px">
+  {% csrf_token %}
+  <label style="display:block;font-weight:bold;margin-bottom:8px">Asset JSON file</label>
+  <input type="file" name="asset_file" accept=".json" multiple
+         style="display:block;margin-bottom:16px">
+  <button type="submit"
+          style="background:#6f42c1;color:white;border:none;padding:10px 20px;border-radius:4px;cursor:pointer;font-size:14px">
+    Import
+  </button>
+  <a href="/admin/git_data/tag/"
+     style="margin-left:12px;color:#6c757d;text-decoration:none">Cancel</a>
+</form>
+
+{% else %}
+  <h2 style="margin-top:24px">Results</h2>
+  <table style="border-collapse:collapse;width:100%;max-width:700px">
+    <thead>
+      <tr style="border-bottom:2px solid #ddd;text-align:left">
+        <th style="padding:8px 12px">Company / Tag</th>
+        <th style="padding:8px 12px">Regexes created</th>
+        <th style="padding:8px 12px">Already existed</th>
+        <th style="padding:8px 12px">CIDRs/IPs</th>
+        <th style="padding:8px 12px">URL entries skipped</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in results %}
+      <tr style="border-bottom:1px solid #eee">
+        <td style="padding:8px 12px">
+          <a href="/admin/git_data/tag/{{ row.tag.pk }}/change/">{{ row.company }}</a>
+          {% if row.tag_created %}<span style="font-size:11px;color:#28a745;margin-left:6px">(new tag)</span>{% endif %}
+        </td>
+        <td style="padding:8px 12px">{{ row.created }}</td>
+        <td style="padding:8px 12px">{{ row.existing }}</td>
+        <td style="padding:8px 12px">{{ row.cidr_count }}</td>
+        <td style="padding:8px 12px">{{ row.skipped_urls }}</td>
+      </tr>
+      {% empty %}
+      <tr><td colspan="5" style="padding:8px 12px;color:#6c757d">No in-scope assets found.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <div style="margin-top:20px">
+    <a href="/admin/git_data/tag/"
+       style="background:#0d6efd;color:white;padding:8px 16px;border-radius:4px;text-decoration:none">
+      Back to Tags
+    </a>
+    <a href="/admin/git_data/tag/import-assets/"
+       style="margin-left:12px;color:#6c757d;text-decoration:none">Import another file</a>
+  </div>
+{% endif %}
+{% endblock %}
